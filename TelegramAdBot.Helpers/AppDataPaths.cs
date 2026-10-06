@@ -13,6 +13,8 @@ public static class AppDataPaths
 
 	public static string ConfigFile => Path.Combine(Root, "config.json");
 
+	public static string BotConfigFile => Path.Combine(Root, "bots.json");
+
 	public static string SetupFlagFile => Path.Combine(Root, "setup_done.flag");
 
 	public static string BotsFile => Path.Combine(ExeFolder, "bots.txt");

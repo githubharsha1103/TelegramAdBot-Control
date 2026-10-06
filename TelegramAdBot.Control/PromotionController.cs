@@ -13,6 +13,7 @@ namespace TelegramAdBot.Control;
 public sealed class PromotionController
 {
     private readonly BotConfig _config;
+    private readonly BotConfigManager _botConfig;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private InstanceManager? _manager;
     private PromotionRunConfiguration? _run;
@@ -20,9 +21,12 @@ public sealed class PromotionController
     private bool _isStopping;
     private string _lastError = "";
 
-    public PromotionController(BotConfig config) => _config = config;
+    public PromotionController(BotConfig config, BotConfigManager? botConfig = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); }
 
-    public IReadOnlyList<string> GetAvailableBots() => BotListLoader.Load();
+    public IReadOnlyList<string> GetAvailableBots() => _botConfig.GetBots();
+    public int GetConfiguredBotCount() => _botConfig.GetBots().Count;
+    public bool TryAddBot(string username, out string normalized, out string error) => _botConfig.TryAdd(username, out normalized, out error);
+    public bool RemoveBot(string username) => _botConfig.Remove(username);
 
     public async Task<ControlResult> ConfigureAsync(PromotionRunConfiguration run)
     {
@@ -32,7 +36,7 @@ public sealed class PromotionController
             if (_manager?.AnyRunning == true || _isStopping)
                 return Fail("Promotion is active; stop it before changing the configuration.");
 
-            var available = BotListLoader.Load();
+            var available = _botConfig.GetBots();
             var requested = run.SelectedBots.Select(x => x.Trim().TrimStart('@')).Where(x => x.Length > 0).Distinct().ToList();
             if (requested.Count == 0) return Fail("Select at least one bot.");
             if (requested.Any(x => !available.Contains(x, StringComparer.OrdinalIgnoreCase))) return Fail("One or more selected bots are no longer available.");
