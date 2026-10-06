@@ -1,0 +1,372 @@
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace TelegramAdBot.Helpers;
+
+public class GlobalHotkeyListener : IDisposable
+{
+    private record HotkeyRegistration(
+        int Id,
+        uint Mods,
+        uint Key,
+        string Name
+    );
+
+    // X11 modifier masks
+    private const uint X_SHIFT = 1;
+    private const uint X_CONTROL = 4;
+    private const uint X_ALT = 8;
+
+    // X11 event
+    private const int KeyPress = 2;
+    private const long KeyPressMask = 1L << 0;
+
+    // X11 modifier mapping
+    private const uint AnyModifier = 1u << 15;
+
+    private readonly List<HotkeyRegistration> _pending = new();
+    private readonly Dictionary<int, Action> _handlers = new();
+
+    private int _nextId = 1;
+    private Thread? _msgThread;
+    private volatile bool _running;
+
+    private nint _display;
+    private nint _root;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct XKeyEvent
+    {
+        public int type;
+        public nint serial;
+        public int send_event;
+        public nint display;
+        public nint window;
+        public nint root;
+        public nint subwindow;
+        public long time;
+        public uint x;
+        public uint y;
+        public uint x_root;
+        public uint y_root;
+        public uint state;
+        public byte keycode;
+        public int same_screen;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 192)]
+    private struct XEvent
+    {
+        [FieldOffset(0)]
+        public int type;
+
+        [FieldOffset(0)]
+        public XKeyEvent key;
+    }
+
+    [DllImport("libX11.so.6")]
+    private static extern nint XOpenDisplay(nint display);
+
+    [DllImport("libX11.so.6")]
+    private static extern int XCloseDisplay(nint display);
+
+    [DllImport("libX11.so.6")]
+    private static extern nint XDefaultRootWindow(nint display);
+
+    [DllImport("libX11.so.6")]
+    private static extern int XGrabKey(
+        nint display,
+        int keycode,
+        uint modifiers,
+        nint grab_window,
+        bool owner_events,
+        int pointer_mode,
+        int keyboard_mode
+    );
+
+    [DllImport("libX11.so.6")]
+    private static extern int XUngrabKey(
+        nint display,
+        int keycode,
+        uint modifiers,
+        nint grab_window
+    );
+
+    [DllImport("libX11.so.6")]
+    private static extern int XSelectInput(
+        nint display,
+        nint window,
+        long event_mask
+    );
+
+    [DllImport("libX11.so.6")]
+    private static extern int XNextEvent(
+        nint display,
+        out XEvent xevent
+    );
+
+    [DllImport("libX11.so.6")]
+    private static extern byte XKeysymToKeycode(
+        nint display,
+        nint keysym
+    );
+
+    [DllImport("libX11.so.6")]
+    private static extern int XFlush(nint display);
+
+    public const uint MOD_ALT = 1u;
+    public const uint MOD_CONTROL = 2u;
+    public const uint MOD_SHIFT = 4u;
+    public const uint MOD_WIN = 8u;
+
+    public void Register(
+        uint modifiers,
+        uint key,
+        string name,
+        Action callback)
+    {
+        int id = _nextId++;
+
+        _pending.Add(
+            new HotkeyRegistration(id, modifiers, key, name)
+        );
+
+        _handlers[id] = callback;
+    }
+
+    public void Start()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            StartWindows();
+            return;
+        }
+
+        if (!OperatingSystem.IsLinux())
+        {
+            Logger.Warning(
+                "Global hotkeys are not supported on this operating system."
+            );
+            return;
+        }
+
+        _running = true;
+
+        _msgThread = new Thread(X11MessageLoop)
+        {
+            IsBackground = true,
+            Name = "GlobalHotkeyThread"
+        };
+
+        _msgThread.Start();
+    }
+
+    private void StartWindows()
+    {
+        Logger.Warning(
+            "Windows hotkey support is not included in the Linux build."
+        );
+    }
+
+    private void X11MessageLoop()
+    {
+        try
+        {
+            _display = XOpenDisplay(nint.Zero);
+
+            if (_display == nint.Zero)
+            {
+                Logger.Error(
+                    "Could not open X11 display. Make sure DISPLAY is set."
+                );
+                return;
+            }
+
+            _root = XDefaultRootWindow(_display);
+
+            XSelectInput(
+                _display,
+                _root,
+                KeyPressMask
+            );
+
+            int registered = 0;
+
+            foreach (HotkeyRegistration hk in _pending)
+            {
+                byte keycode = GetLinuxKeycode(hk.Key);
+
+                if (keycode == 0)
+                {
+                    Logger.Warning(
+                        $"Could not map hotkey: {hk.Name}"
+                    );
+                    continue;
+                }
+
+                uint xmods = ConvertModifiers(hk.Mods);
+
+                int result = XGrabKey(
+                    _display,
+                    keycode,
+                    xmods,
+                    _root,
+                    false,
+                    1,
+                    1
+                );
+
+                if (result == 0)
+                {
+                    registered++;
+
+                    Logger.Info(
+                        $"Registered Linux hotkey: {hk.Name}"
+                    );
+                }
+                else
+                {
+                    Logger.Warning(
+                        $"Failed to register Linux hotkey: {hk.Name}"
+                    );
+                }
+            }
+
+            XFlush(_display);
+
+            Logger.Success(
+                $"Linux global hotkeys registered: {registered}/{_pending.Count}"
+            );
+
+            while (_running)
+            {
+                XNextEvent(_display, out XEvent ev);
+
+                if (!_running)
+                    break;
+
+                if (ev.type != KeyPress)
+                    continue;
+
+                int keycode = ev.key.keycode;
+                uint state = ev.key.state;
+
+                foreach (HotkeyRegistration hk in _pending)
+                {
+                    byte expectedKeycode =
+                        GetLinuxKeycode(hk.Key);
+
+                    uint expectedMods =
+                        ConvertModifiers(hk.Mods);
+
+                    if (keycode == expectedKeycode &&
+                        (state & 0xFFu) == expectedMods)
+                    {
+                        if (_handlers.TryGetValue(
+                            hk.Id,
+                            out Action? callback))
+                        {
+                            try
+                            {
+                                callback();
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Error(
+                                    "Hotkey callback error: " +
+                                    ex.Message
+                                );
+                            }
+                        }
+
+                        break;
+                    }
+                }
+            }
+
+            foreach (HotkeyRegistration hk in _pending)
+            {
+                byte keycode = GetLinuxKeycode(hk.Key);
+
+                if (keycode != 0)
+                {
+                    XUngrabKey(
+                        _display,
+                        keycode,
+                        ConvertModifiers(hk.Mods),
+                        _root
+                    );
+                }
+            }
+
+            XFlush(_display);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error(
+                "Linux hotkey listener error: " +
+                ex.Message
+            );
+        }
+        finally
+        {
+            if (_display != nint.Zero)
+            {
+                XCloseDisplay(_display);
+                _display = nint.Zero;
+            }
+        }
+    }
+
+    private static uint ConvertModifiers(uint modifiers)
+    {
+        uint result = 0;
+
+        if ((modifiers & MOD_SHIFT) != 0)
+            result |= X_SHIFT;
+
+        if ((modifiers & MOD_CONTROL) != 0)
+            result |= X_CONTROL;
+
+        if ((modifiers & MOD_ALT) != 0)
+            result |= X_ALT;
+
+        return result;
+    }
+
+    private byte GetLinuxKeycode(uint windowsVirtualKey)
+    {
+        if (_display == nint.Zero)
+            return 0;
+
+        // Windows VK_A..VK_Z are 0x41..0x5A.
+        // X11 keysyms for letters are lowercase ASCII.
+        if (windowsVirtualKey >= 0x41 &&
+            windowsVirtualKey <= 0x5A)
+        {
+            nint keysym =
+                (nint)(windowsVirtualKey + 0x20);
+
+            return XKeysymToKeycode(
+                _display,
+                keysym
+            );
+        }
+
+        return 0;
+    }
+
+    public void Dispose()
+    {
+        _running = false;
+
+        // XNextEvent can block, so closing the display wakes it.
+        if (_display != nint.Zero)
+        {
+            XCloseDisplay(_display);
+            _display = nint.Zero;
+        }
+    }
+}

@@ -1,0 +1,140 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading.Tasks;
+
+namespace TelegramAdBot.Helpers;
+
+public static class PlaywrightHelper
+{
+	private static readonly object _lock = new object();
+
+	private static bool _installed = false;
+
+	public static async Task<bool> EnsureChromiumInstalledAsync()
+	{
+		string existingPath = FindChromiumPath();
+		if (!string.IsNullOrEmpty(existingPath) && File.Exists(existingPath))
+		{
+			Logger.Success("Chromium found at: " + existingPath);
+			return true;
+		}
+		lock (_lock)
+		{
+			if (_installed)
+			{
+				Logger.Info("Chromium installation already attempted.");
+				return FindChromiumPath() != null;
+			}
+			_installed = true;
+		}
+		Logger.Warning("Chromium not found. Installing via Playwright...");
+		Logger.Info("This will download Chromium (~150 MB)");
+		try
+		{
+			if (await InstallViaPowerShellAsync())
+			{
+				Logger.Success("Chromium installed successfully!");
+				return true;
+			}
+			Logger.Error("Chromium installation failed.");
+			return false;
+		}
+		catch (Exception ex)
+		{
+			Logger.Error("Installation error: " + ex.Message);
+			return false;
+		}
+	}
+
+	private static async Task<bool> InstallViaPowerShellAsync()
+	{
+		_ = 3;
+		try
+		{
+			string script = "\r\n                $env:PLAYWRIGHT_BROWSERS_PATH = $env:USERPROFILE + '\\AppData\\Local\\ms-playwright'\r\n                if (-not (Get-Command playwright -ErrorAction SilentlyContinue)) {\r\n                    dotnet tool install --global Microsoft.Playwright.CLI --version 1.48.0 2>$null\r\n                }\r\n                playwright install chromium\r\n            ";
+			string tempScript = Path.GetTempFileName() + ".ps1";
+			await File.WriteAllTextAsync(tempScript, script);
+			ProcessStartInfo startInfo = new ProcessStartInfo
+			{
+				FileName = "powershell.exe",
+				Arguments = "-ExecutionPolicy Bypass -File \"" + tempScript + "\"",
+				UseShellExecute = false,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				CreateNoWindow = true
+			};
+			Logger.Info("Running PowerShell installer...");
+			using Process process = new Process
+			{
+				StartInfo = startInfo
+			};
+			process.Start();
+			string output = await process.StandardOutput.ReadToEndAsync();
+			string error = await process.StandardError.ReadToEndAsync();
+			await process.WaitForExitAsync();
+			try
+			{
+				File.Delete(tempScript);
+			}
+			catch
+			{
+			}
+			if (!string.IsNullOrEmpty(output))
+			{
+				Logger.Info("Installer output: " + output.Trim());
+			}
+			if (!string.IsNullOrEmpty(error))
+			{
+				Logger.Warning("Installer errors: " + error.Trim());
+			}
+			return FindChromiumPath() != null;
+		}
+		catch (Exception ex)
+		{
+			Logger.Error("PowerShell install failed: " + ex.Message);
+			return false;
+		}
+	}
+
+	public static string? FindChromiumPath()
+	{
+		try
+		{
+			string playwrightBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ms-playwright");
+			if (!Directory.Exists(playwrightBase))
+			{
+				return null;
+			}
+			string[] directories = Directory.GetDirectories(playwrightBase, "chromium-*");
+			foreach (string dir in directories)
+			{
+				string exePath = Path.Combine(dir, "chrome-win", "chrome.exe");
+				if (File.Exists(exePath))
+				{
+					return exePath;
+				}
+				exePath = Path.Combine(dir, "chrome.exe");
+				if (File.Exists(exePath))
+				{
+					return exePath;
+				}
+			}
+			directories = Directory.GetDirectories(playwrightBase, "*", SearchOption.AllDirectories);
+			for (int i = 0; i < directories.Length; i++)
+			{
+				string exePath2 = Path.Combine(directories[i], "chrome.exe");
+				if (File.Exists(exePath2))
+				{
+					return exePath2;
+				}
+			}
+			return null;
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning("Error finding Chromium: " + ex.Message);
+			return null;
+		}
+	}
+}

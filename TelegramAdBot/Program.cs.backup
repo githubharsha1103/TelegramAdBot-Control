@@ -1,0 +1,341 @@
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+using TelegramAdBot.Auth;
+using TelegramAdBot.Core;
+using TelegramAdBot.Helpers;
+using TelegramAdBot.Models;
+
+namespace TelegramAdBot;
+
+internal class Program
+{
+	private static readonly BotConfig _config = new BotConfig();
+
+	private static InstanceManager _manager = null;
+
+	private static GlobalHotkeyListener _hotkeys = null;
+
+	private static readonly TaskCompletionSource _exitSignal = new TaskCompletionSource();
+
+	private static bool _isFirstRunSetupMode = false;
+
+	private static async Task Main(string[] args)
+	{
+		Console.Title = "Telegram Ad Bot - Professional v" + VersionInfo.CurrentString;
+		if (Enumerable.Contains(args, "--update"))
+		{
+			await RunAsUpdaterAsync(args);
+			return;
+		}
+		AppDataPaths.EnsureDirectories();
+		Logger.InitFileLogging();
+		Logger.Info("Application starting — v" + VersionInfo.CurrentString);
+		if (!CheckChromiumExists())
+		{
+			Logger.Warning("Chromium not found. Installing...");
+			if (!(await InstallChromiumAsync()))
+			{
+				Logger.Error("Cannot continue without Chromium browser.");
+				Console.WriteLine("\n Press any key to exit...");
+				Console.ReadKey();
+				Logger.CloseFileLogging();
+				return;
+			}
+		}
+		if (!(await new AuthManager().AuthenticateAsync()))
+		{
+			Logger.Error("Authentication failed. Exiting.");
+			Console.WriteLine("\n Press any key to exit...");
+			Console.ReadKey();
+			Logger.CloseFileLogging();
+			return;
+		}
+		UpdateInfo update = await UpdateChecker.CheckAsync();
+		if (update != null && await Updater.PerformUpdateAsync(update))
+		{
+			Logger.Info("Exiting so updater can replace this exe...");
+			Logger.CloseFileLogging();
+			Environment.Exit(0);
+			return;
+		}
+		_config.BotList = BotListLoader.Load();
+		if (_config.BotList.Count == 0)
+		{
+			Logger.Error("No bots. See: " + AppDataPaths.BotsFile);
+			Console.WriteLine("\n Press any key to exit...");
+			Console.ReadKey();
+			Logger.CloseFileLogging();
+			return;
+		}
+		bool positionsLoaded = ConfigStorage.LoadPositions(_config);
+		_config.SetupDone = ConfigStorage.IsSetupDone();
+		bool fullyConfigured = _config.SetupDone && positionsLoaded && _config.AllSet;
+		_isFirstRunSetupMode = !fullyConfigured;
+		_manager = new InstanceManager(_config);
+		_manager.OnAllFinished += delegate
+		{
+			_exitSignal.TrySetResult();
+		};
+		RegisterGlobalHotkeys();
+		ConsoleUI.PrintMainBanner(_config.BotList.Count, _config.InstanceCount, _config.CyclesPerBot, fullyConfigured);
+		if (!_isFirstRunSetupMode)
+		{
+			await NormalRunFlowAsync();
+		}
+		else
+		{
+			await FirstTimeSetupFlowAsync();
+		}
+		await _exitSignal.Task;
+		Logger.Info("Shutting down...");
+		_hotkeys?.Dispose();
+		Logger.CloseFileLogging();
+		await Task.Delay(200);
+		Environment.Exit(0);
+	}
+
+	private static bool CheckChromiumExists()
+	{
+		return PlaywrightHelper.FindChromiumPath() != null;
+	}
+
+	private static async Task<bool> InstallChromiumAsync()
+	{
+		return await PlaywrightHelper.EnsureChromiumInstalledAsync();
+	}
+
+	private static async Task RunAsUpdaterAsync(string[] args)
+	{
+		try
+		{
+			string target = "";
+			int pid = 0;
+			foreach (string arg in args)
+			{
+				if (arg.StartsWith("--target="))
+				{
+					target = arg.Substring("--target=".Length).Trim('"');
+				}
+				else if (arg.StartsWith("--pid="))
+				{
+					int.TryParse(arg.Substring("--pid=".Length), out pid);
+				}
+			}
+			if (string.IsNullOrEmpty(target) || pid == 0)
+			{
+				Console.WriteLine("Invalid updater args.");
+				await Task.Delay(3000);
+				return;
+			}
+			await Updater.RunUpdaterModeAsync(target, pid);
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine("Fatal updater error: " + ex.Message);
+			await Task.Delay(5000);
+		}
+	}
+
+	private static async Task FirstTimeSetupFlowAsync()
+	{
+		Logger.Warning("═══ FIRST-TIME SETUP MODE ═══");
+		Logger.Info("Opening ONLY 1 browser for setup...");
+		Logger.Info("Other browsers will open after setup is complete.");
+		await _manager.OpenFirstInstanceOnlyAsync();
+		ConsoleUI.PrintFirstRunInstructions();
+		Logger.Warning("Waiting for you to pick positions and press Ctrl+Shift+M...");
+	}
+
+	private static async Task NormalRunFlowAsync()
+	{
+		Logger.Success("Setup previously completed. Full launch mode.");
+		Console.WriteLine();
+		await _manager.OpenAllAsync();
+		ConsoleUI.PrintReadyBanner();
+		if (_config.AutoStartLoop)
+		{
+			Logger.Success("Auto-starting loops in 3 seconds...");
+			await Task.Delay(3000);
+			Task.Run(async delegate
+			{
+				await _manager.StartAllAsync();
+			});
+		}
+	}
+
+	private static async Task HandleMarkSetupDoneAsync()
+	{
+		if (!_isFirstRunSetupMode)
+		{
+			Logger.Info("Setup already marked done. Ignoring.");
+			return;
+		}
+		if (!_config.AllSet)
+		{
+			Logger.Error("Cannot mark done — some positions are missing!");
+			Console.WriteLine();
+			Console.ForegroundColor = ConsoleColor.Red;
+			Console.WriteLine("✗ Please pick ALL 4 positions first:");
+			Console.WriteLine("Ctrl+Alt+E -> EMOJI BUTTON " + StatusMark(_config.EmojiButtonX));
+			Console.WriteLine("Ctrl+Alt+F -> STICKER TAB   " + StatusMark(_config.StickerTabX));
+			Console.WriteLine("Ctrl+Alt+S -> STICKER       " + StatusMark(_config.StickerX));
+			Console.WriteLine("Ctrl+Alt+T -> TEXTBOX       " + StatusMark(_config.TextboxX));
+			Console.ResetColor();
+			Console.WriteLine();
+			return;
+		}
+		ConfigStorage.MarkSetupDone();
+		_config.SetupDone = true;
+		Logger.Success("═══ SETUP COMPLETE ═══");
+		Logger.Info("Closing setup browser...");
+		await _manager.CloseFirstInstanceAsync();
+		Console.WriteLine();
+		Console.ForegroundColor = ConsoleColor.Green;
+		Console.WriteLine("╔══════════════════════════════════════════════════════╗");
+		Console.WriteLine("║     SETUP COMPLETED SUCCESSFULLY!                    ║");
+		Console.WriteLine("║                                                      ║");
+		Console.WriteLine("║ Restarting application in 3 seconds...               ║");
+		Console.WriteLine("║ All browsers will open + auto-start loops.           ║");
+		Console.WriteLine("║                                                      ║");
+		Console.WriteLine("╚══════════════════════════════════════════════════════╝");
+		Console.ResetColor();
+		for (int i = 3; i > 0; i--)
+		{
+			Logger.Info($"Restarting in {i}...");
+			await Task.Delay(1000);
+		}
+		RestartApplication();
+	}
+
+	private static string StatusMark(int val)
+	{
+		if (val <= 0)
+		{
+			return "✗ (not set)";
+		}
+		return "✓ (set)";
+	}
+
+	private static void RestartApplication()
+	{
+		try
+		{
+			string exePath = Process.GetCurrentProcess().MainModule?.FileName;
+			if (!string.IsNullOrEmpty(exePath))
+			{
+				Process.Start(new ProcessStartInfo
+				{
+					FileName = exePath,
+					UseShellExecute = true
+				});
+			}
+		}
+		catch (Exception ex)
+		{
+			Logger.Error("Restart failed: " + ex.Message);
+		}
+		_hotkeys?.Dispose();
+		Logger.CloseFileLogging();
+		Environment.Exit(0);
+	}
+
+	private static void RegisterGlobalHotkeys()
+	{
+		_hotkeys = new GlobalHotkeyListener();
+		uint CS = 6u;
+		uint CA = 3u;
+		_hotkeys.Register(CS, 71u, "Ctrl+Shift+G (Start)", delegate
+		{
+			Logger.Info("[Hotkey] START");
+			Task.Run(async delegate
+			{
+				await _manager.StartAllAsync();
+			});
+		});
+		_hotkeys.Register(CS, 80u, "Ctrl+Shift+P (Pause)", delegate
+		{
+			Logger.Info("[Hotkey] PAUSE");
+			_manager.PauseAll();
+		});
+		_hotkeys.Register(CS, 75u, "Ctrl+Shift+K (Kill)", delegate
+		{
+			Logger.Info("[Hotkey] STOP");
+			Task.Run(async delegate
+			{
+				await _manager.StopAllAsync();
+			});
+		});
+		_hotkeys.Register(CS, 90u, "Ctrl+Shift+Z (Exit)", delegate
+		{
+			Logger.Info("[Hotkey] EXIT");
+			Task.Run(async delegate
+			{
+				await _manager.StopAllAsync();
+				_exitSignal.TrySetResult();
+			});
+		});
+		_hotkeys.Register(CS, 77u, "Ctrl+Shift+M (Setup done)", delegate
+		{
+			Logger.Info("[Hotkey] SETUP DONE");
+			Task.Run(async delegate
+			{
+				await HandleMarkSetupDoneAsync();
+			});
+		});
+		_hotkeys.Register(CA, 69u, "Ctrl+Alt+E (Emoji btn)", delegate
+		{
+			Logger.Info("[Hotkey] PICK EMOJI BUTTON");
+			Task.Run(async delegate
+			{
+				await _manager.PickAsync("EMOJI BUTTON", delegate(int x, int y)
+				{
+					_config.EmojiButtonX = x;
+					_config.EmojiButtonY = y;
+					ConfigStorage.SavePositions(_config);
+				});
+			});
+		});
+		_hotkeys.Register(CA, 70u, "Ctrl+Alt+F (Sticker tab)", delegate
+		{
+			Logger.Info("[Hotkey] PICK STICKER TAB");
+			Task.Run(async delegate
+			{
+				await _manager.PickAsync("STICKER TAB", delegate(int x, int y)
+				{
+					_config.StickerTabX = x;
+					_config.StickerTabY = y;
+					ConfigStorage.SavePositions(_config);
+				});
+			});
+		});
+		_hotkeys.Register(CA, 84u, "Ctrl+Alt+T (Textbox)", delegate
+		{
+			Logger.Info("[Hotkey] PICK TEXTBOX");
+			Task.Run(async delegate
+			{
+				await _manager.PickAsync("TEXTBOX", delegate(int x, int y)
+				{
+					_config.TextboxX = x;
+					_config.TextboxY = y;
+					ConfigStorage.SavePositions(_config);
+				});
+			});
+		});
+		_hotkeys.Register(CA, 83u, "Ctrl+Alt+S (Sticker)", delegate
+		{
+			Logger.Info("[Hotkey] PICK STICKER");
+			Task.Run(async delegate
+			{
+				await _manager.PickAsync("STICKER", delegate(int x, int y)
+				{
+					_config.StickerX = x;
+					_config.StickerY = y;
+					ConfigStorage.SavePositions(_config);
+				});
+			});
+		});
+		_hotkeys.Start();
+	}
+}

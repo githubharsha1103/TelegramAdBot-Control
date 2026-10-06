@@ -1,0 +1,143 @@
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace TelegramAdBot.Helpers;
+
+public class GlobalHotkeyListener : IDisposable
+{
+	private struct MSG
+	{
+		public nint hwnd;
+
+		public uint message;
+
+		public nint wParam;
+
+		public nint lParam;
+
+		public uint time;
+
+		public int pt_x;
+
+		public int pt_y;
+	}
+
+	private record HotkeyRegistration(int Id, uint Mods, uint Key, string Name);
+
+	public const uint MOD_ALT = 1u;
+
+	public const uint MOD_CONTROL = 2u;
+
+	public const uint MOD_SHIFT = 4u;
+
+	public const uint MOD_WIN = 8u;
+
+	private const int WM_HOTKEY = 786;
+
+	private const uint WM_QUIT = 18u;
+
+	private readonly List<HotkeyRegistration> _pending = new List<HotkeyRegistration>();
+
+	private readonly Dictionary<int, Action> _handlers = new Dictionary<int, Action>();
+
+	private int _nextId = 1;
+
+	private Thread? _msgThread;
+
+	private uint _msgThreadId;
+
+	private volatile bool _running;
+
+	[DllImport("user32.dll")]
+	private static extern bool RegisterHotKey(nint hWnd, int id, uint fsModifiers, uint vk);
+
+	[DllImport("user32.dll")]
+	private static extern bool UnregisterHotKey(nint hWnd, int id);
+
+	[DllImport("user32.dll")]
+	private static extern int GetMessage(out MSG lpMsg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+	[DllImport("user32.dll")]
+	private static extern bool PostThreadMessage(uint idThread, uint Msg, nint wParam, nint lParam);
+
+	[DllImport("kernel32.dll")]
+	private static extern uint GetCurrentThreadId();
+
+	public void Register(uint modifiers, uint key, string name, Action callback)
+	{
+		int id = _nextId++;
+		_pending.Add(new HotkeyRegistration(id, modifiers, key, name));
+		_handlers[id] = callback;
+	}
+
+	public void Start()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			Logger.Warning("Global hotkeys only supported on Windows.");
+			return;
+		}
+		_running = true;
+		_msgThread = new Thread(MessageLoop)
+		{
+			IsBackground = true,
+			Name = "GlobalHotkeyThread"
+		};
+		if (OperatingSystem.IsWindows())
+		{
+			_msgThread.SetApartmentState(ApartmentState.STA);
+		}
+		_msgThread.Start();
+	}
+
+	private void MessageLoop()
+	{
+		_msgThreadId = GetCurrentThreadId();
+		int okCount = 0;
+		foreach (HotkeyRegistration hk in _pending)
+		{
+			if (RegisterHotKey(IntPtr.Zero, hk.Id, hk.Mods, hk.Key))
+			{
+				okCount++;
+				continue;
+			}
+			Logger.Warning($"Failed to register hotkey: {hk.Name} (id={hk.Id}). Maybe another app is using it.");
+		}
+		Logger.Success($"Global hotkeys registered: {okCount}/{_pending.Count} (works anywhere on system)");
+		MSG msg;
+		while (_running && GetMessage(out msg, IntPtr.Zero, 0u, 0u) > 0)
+		{
+			if (msg.message != 786)
+			{
+				continue;
+			}
+			int id = ((IntPtr)msg.wParam).ToInt32();
+			if (_handlers.TryGetValue(id, out Action cb))
+			{
+				try
+				{
+					cb();
+				}
+				catch (Exception ex)
+				{
+					Logger.Error("Hotkey callback error: " + ex.Message);
+				}
+			}
+		}
+		foreach (HotkeyRegistration hk2 in _pending)
+		{
+			UnregisterHotKey(IntPtr.Zero, hk2.Id);
+		}
+	}
+
+	public void Dispose()
+	{
+		_running = false;
+		if (_msgThreadId != 0)
+		{
+			PostThreadMessage(_msgThreadId, 18u, IntPtr.Zero, IntPtr.Zero);
+		}
+	}
+}
