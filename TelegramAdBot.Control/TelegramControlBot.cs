@@ -98,7 +98,7 @@ public sealed class TelegramControlBot : IDisposable
         if (text.StartsWith("/pause", StringComparison.OrdinalIgnoreCase)) { await ResultAsync(chatId.Value, await _controller.PauseAsync(), ct); return; }
         if (text.StartsWith("/resume", StringComparison.OrdinalIgnoreCase)) { await ResultAsync(chatId.Value, await _controller.ResumeAsync(), ct); return; }
         if (text.StartsWith("/stop", StringComparison.OrdinalIgnoreCase)) { await ConfirmStopAsync(chatId.Value, ct); return; }
-        if (text.StartsWith("/help", StringComparison.OrdinalIgnoreCase)) { await _bot.SendMessage(chatId.Value, "/start — configure\n/status — current status\n/pause, /resume, /stop", cancellationToken: ct); return; }
+        if (text.StartsWith("/help", StringComparison.OrdinalIgnoreCase)) { await _bot.SendMessage(chatId.Value, "/start \u2014 configure\n/status \u2014 current status\n/pause, /resume, /stop", cancellationToken: ct); return; }
         await NumericAsync(chatId.Value, text, ct);
     }
 
@@ -133,7 +133,7 @@ public sealed class TelegramControlBot : IDisposable
         if (data == "clear") { s.SelectedBots.Clear(); await BotPickerAsync(chatId, ct); return; }
         if (data == "continue") { if (s.SelectedBots.Count == 0) { await _bot.SendMessage(chatId, "Select at least one bot.", cancellationToken: ct); return; } s.Step = Step.Instances; await InstancePickerAsync(chatId, ct); return; }
         if (data == "custom") { s.Step = Step.Instances; await _bot.SendMessage(chatId, "Send an instance count from 1 to 20.", cancellationToken: ct); return; }
-        if (data.StartsWith("instances:")) { s.Instances = int.Parse(data.Substring(10)); s.Step = Step.Cycles; await _bot.SendMessage(chatId, "ðŸ”„ How many cycles should each selected bot run?", cancellationToken: ct); return; }
+        if (data.StartsWith("instances:")) { s.Instances = int.Parse(data.Substring(10)); s.Step = Step.Cycles; await _bot.SendMessage(chatId, "\U0001F504 How many cycles should each selected bot run?", cancellationToken: ct); return; }
         if (data == "start") { await StartAsync(chatId, s, ct); return; }
         if (data == "edit") { s.Step = Step.Bots; await BotPickerAsync(chatId, ct); return; }
         if (data == "cancel") { _sessions.TryRemove(chatId, out var ignored); await _bot.SendMessage(chatId, "Configuration cancelled.", cancellationToken: ct); }
@@ -142,22 +142,22 @@ public sealed class TelegramControlBot : IDisposable
     private async Task NumericAsync(long chatId, string text, CancellationToken ct)
     {
         if (!_sessions.TryGetValue(chatId, out var s) || !int.TryParse(text, out int n) || n < 1) return;
-        if (s.Step == Step.Instances) { if (n > 20) { await _bot.SendMessage(chatId, "Maximum is 20.", cancellationToken: ct); return; } s.Instances = n; s.Step = Step.Cycles; await _bot.SendMessage(chatId, "ðŸ”„ How many cycles should each selected bot run?", cancellationToken: ct); return; }
+        if (s.Step == Step.Instances) { if (n > 20) { await _bot.SendMessage(chatId, "Maximum is 20.", cancellationToken: ct); return; } s.Instances = n; s.Step = Step.Cycles; await _bot.SendMessage(chatId, "\U0001F504 How many cycles should each selected bot run?", cancellationToken: ct); return; }
         if (s.Step == Step.Cycles) { if (n > 100000) { await _bot.SendMessage(chatId, "Maximum is 100000.", cancellationToken: ct); return; } s.Cycles = n; s.Step = Step.Confirm; await ConfirmRunAsync(chatId, s, ct); }
     }
 
     private async Task BotPickerAsync(long chatId, CancellationToken ct)
     {
         var s = _sessions[chatId];
-        var rows = s.AvailableBots.Select(x => new[] { InlineKeyboardButton.WithCallbackData((s.SelectedBots.Contains(x) ? "â˜‘ " : "â˜ ") + "@" + x, "bot:" + x) }).ToList();
+        var rows = s.AvailableBots.Select(x => new[] { InlineKeyboardButton.WithCallbackData((s.SelectedBots.Contains(x) ? "\u2611 " : "\u2610 ") + "@" + x, "bot:" + x) }).ToList();
         rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Select All", "all"), InlineKeyboardButton.WithCallbackData("Clear All", "clear") });
         rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Continue", "continue") });
-        await _bot.SendMessage(chatId, "ðŸ¤– Select the bots you want to promote", replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+        await _bot.SendMessage(chatId, "\U0001F916 Select the bots you want to promote", replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
     }
 
-    private Task InstancePickerAsync(long chatId, CancellationToken ct) => _bot.SendMessage(chatId, "ðŸŒ How many Chromium instances do you want to run?", replyMarkup: new InlineKeyboardMarkup(new[] { new[] { 1, 2, 3, 4, 5 }.Select(x => InlineKeyboardButton.WithCallbackData(x.ToString(), "instances:" + x)).ToArray(), new[] { InlineKeyboardButton.WithCallbackData("Custom", "custom") } }), cancellationToken: ct);
+    private Task InstancePickerAsync(long chatId, CancellationToken ct) => _bot.SendMessage(chatId, "\U0001F310 How many Chromium instances do you want to run?", replyMarkup: new InlineKeyboardMarkup(new[] { new[] { 1, 2, 3, 4, 5 }.Select(x => InlineKeyboardButton.WithCallbackData(x.ToString(), "instances:" + x)).ToArray(), new[] { InlineKeyboardButton.WithCallbackData("Custom", "custom") } }), cancellationToken: ct);
 
-    private Task ConfirmRunAsync(long chatId, Session s, CancellationToken ct) => _bot.SendMessage(chatId, $"ðŸš€ PROMOTION CONFIGURATION\n\nBots:\n{string.Join("\n", s.SelectedBots.Select(x => "â€¢ @" + x))}\n\nChromium instances: {s.Instances}\nCycles per bot: {s.Cycles}\nTotal bots: {s.SelectedBots.Count}\nTotal planned bot-cycles per instance: {s.SelectedBots.Count * s.Cycles}", replyMarkup: new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("â–¶ START", "start"), InlineKeyboardButton.WithCallbackData("âœï¸ EDIT", "edit") }, new[] { InlineKeyboardButton.WithCallbackData("âŒ CANCEL", "cancel") } }), cancellationToken: ct);
+    private Task ConfirmRunAsync(long chatId, Session s, CancellationToken ct) => _bot.SendMessage(chatId, $"\U0001F680 PROMOTION CONFIGURATION\n\nBots:\n{string.Join("\n", s.SelectedBots.Select(x => "\u2022 @" + x))}\n\nChromium instances: {s.Instances}\nCycles per bot: {s.Cycles}\nTotal bots: {s.SelectedBots.Count}\nTotal planned bot-cycles per instance: {s.SelectedBots.Count * s.Cycles}", replyMarkup: new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("\u25B6 START", "start"), InlineKeyboardButton.WithCallbackData("\u270F\uFE0F EDIT", "edit") }, new[] { InlineKeyboardButton.WithCallbackData("\u274C CANCEL", "cancel") } }), cancellationToken: ct);
 
     private async Task StartAsync(long chatId, Session s, CancellationToken ct)
     {
@@ -174,7 +174,7 @@ public sealed class TelegramControlBot : IDisposable
 
     private async Task ResultAsync(long chatId, ControlResult result, CancellationToken ct)
     {
-        await _bot.SendMessage(chatId, (result.Success ? "âœ… " : "âš ï¸ ") + result.Message, cancellationToken: ct);
+        await _bot.SendMessage(chatId, (result.Success ? "\u2705 " : "\u26A0\uFE0F ") + result.Message, cancellationToken: ct);
         await StatusAsync(chatId, ct);
     }
     private async Task ManageBotsAsync(long chatId, CancellationToken ct)
@@ -212,10 +212,10 @@ public sealed class TelegramControlBot : IDisposable
     private static InlineKeyboardMarkup Keyboard(PromotionStatus s) => !s.IsRunning && !s.IsPaused ? new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("\U000025B6 START NEW RUN", "new"), InlineKeyboardButton.WithCallbackData("\U0001F916 Manage Bots", "manage") } }) : new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData(s.IsPaused ? "\U000025B6 RESUME" : "\U000023F8 PAUSE", s.IsPaused ? "resume" : "pause"), InlineKeyboardButton.WithCallbackData("\U000026D4 STOP", "stop:ask"), InlineKeyboardButton.WithCallbackData("\U0001F504 REFRESH", "refresh") }, new[] { InlineKeyboardButton.WithCallbackData("\U0001F916 Manage Bots", "manage") } });
     private string Format(PromotionStatus s)
     {
-        string state = s.IsStopping ? "ðŸ›‘ STOPPING" : s.IsPaused ? "â¸ PROMOTION PAUSED" : s.IsRunning ? "ðŸš€ PROMOTION RUNNING" : "ðŸ›‘ PROMOTION STOPPED";
-        var b = new StringBuilder($"{state}\n\nðŸ¤– Configured bots: {_controller.GetConfiguredBotCount()}\nSelected bots: {s.SelectedBots.Count}\nðŸŒ Instances: {s.InstanceCount}\nðŸ”„ Progress: {s.CompletedCycles}/{s.TotalCycles}\n");
+        string state = s.IsStopping ? "\U0001F6D1 STOPPING" : s.IsPaused ? "\u23F8 PROMOTION PAUSED" : s.IsRunning ? "\U0001F680 PROMOTION RUNNING" : "\U0001F6D1 PROMOTION STOPPED";
+        var b = new StringBuilder($"{state}\n\n\U0001F916 Configured bots: {_controller.GetConfiguredBotCount()}\nSelected bots: {s.SelectedBots.Count}\n\U0001F310 Instances: {s.InstanceCount}\n\U0001F504 Progress: {s.CompletedCycles}/{s.TotalCycles}\n");
         foreach (var i in s.Instances) b.Append($"\nInstance {i.InstanceId}\nBot: @{i.Bot}\nCycle: {i.CurrentCycle}/{i.TotalCyclesForBot}\nStatus: {i.State}\n");
-        return b.Append($"\nâ± Runtime: {TimeSpan.FromSeconds(s.RuntimeSeconds):hh\\:mm\\:ss}\nâš¡ Status: {(s.IsPaused ? "PAUSED" : s.IsRunning ? "RUNNING" : "STOPPED")}").ToString();
+        return b.Append($"\n\u23F1 Runtime: {TimeSpan.FromSeconds(s.RuntimeSeconds):hh\\:mm\\:ss}\n\u26A1 Status: {(s.IsPaused ? "PAUSED" : s.IsRunning ? "RUNNING" : "STOPPED")}").ToString();
     }
     private static Task HandleErrorAsync(ITelegramBotClient _, Exception ex, HandleErrorSource __, CancellationToken ___) { Helpers.Logger.Warning("[CONTROL] Telegram error: " + ex.Message); return Task.CompletedTask; }
     public void Dispose() { _cts.Cancel(); _cts.Dispose(); }
