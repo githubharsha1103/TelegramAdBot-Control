@@ -545,7 +545,7 @@ internal class Program
 				});
 			});
 		});
-		_hotkeys.Register(CA, 49u, "Ctrl+Alt+1 (Account 1)", delegate
+		_hotkeys.Register(0u, 0x70u, "F1 (Account 1)", delegate
 		{
 			Task.Run(async delegate
 			{
@@ -558,7 +558,7 @@ internal class Program
 				});
 			});
 		});
-		_hotkeys.Register(CA, 50u, "Ctrl+Alt+2 (Account 2)", delegate
+		_hotkeys.Register(0u, 0x71u, "F2 (Account 2)", delegate
 		{
 			Task.Run(async delegate
 			{
@@ -571,7 +571,7 @@ internal class Program
 				});
 			});
 		});
-		_hotkeys.Register(CA, 51u, "Ctrl+Alt+3 (Account 3)", delegate
+		_hotkeys.Register(0u, 0x72u, "F3 (Account 3)", delegate
 		{
 			Task.Run(async delegate
 			{
