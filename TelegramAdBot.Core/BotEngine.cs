@@ -23,6 +23,7 @@ public class BotEngine
 	private volatile bool _paused;
 
 	private volatile bool _finished;
+	private bool _keepBrowserOnFinish;
 
 	private int _totalCycles;
 
@@ -55,8 +56,32 @@ public class BotEngine
 	public int CompletedCycles => _completedCycles;
 
 	public string CurrentBotUsername => _currentBotUsername;
+	public async Task<bool> SwitchAccountAsync(int accountNumber)
+	{
+		if (_controller == null || accountNumber < 1 || accountNumber > 3) return false;
+		int x = accountNumber == 1 ? _config.Account1X : accountNumber == 2 ? _config.Account2X : _config.Account3X;
+		int y = accountNumber == 1 ? _config.Account1Y : accountNumber == 2 ? _config.Account2Y : _config.Account3Y;
+		Logger.Info($"Switching to Telegram account {accountNumber}...", _instanceId);
+		if (!await _controller.ClickAsync(_config.AccountMenuX, _config.AccountMenuY)) return false;
+		await Task.Delay(700);
+		if (!await _controller.ClickAsync(x, y)) return false;
+		await Task.Delay(2500);
+		return IsBrowserAlive;
+	}
+
+	public void KeepBrowserOnFinish() => _keepBrowserOnFinish = true;
+
+	public void ResetForNextAccount()
+	{
+		_cyclesOnCurrentBot = 0;
+		_currentBotIndex = 0;
+		_currentBotUsername = _config.BotList.Count > 0 ? _config.BotList[0] : "";
+		_finished = false;
+		_running = false;
+	}
 
 	public event Action<int>? OnFinished;
+	public event Func<int, Task<bool>>? OnAccountWorkFinished;
 
 	public BotEngine(BotConfig config, int instanceId)
 	{
@@ -329,13 +354,28 @@ public class BotEngine
 
 	private async Task<bool> SwitchToNextBotAsync(CancellationToken ct)
 	{
-		int nextIndex = _currentBotIndex + 1;
-		if (nextIndex >= _config.BotList.Count)
-		{
-			Logger.Warning($"Finished all {_config.BotList.Count} bots! Closing browser.", _instanceId);
+			int nextIndex = _currentBotIndex + 1;
+			if (nextIndex >= _config.BotList.Count)
+			{
+				if (OnAccountWorkFinished != null)
+				{
+					_running = false;
+					_finished = true;
+					bool continueWithNextAccount = false;
+					foreach (Func<int, Task<bool>> handler in OnAccountWorkFinished.GetInvocationList())
+						continueWithNextAccount |= await handler(_instanceId);
+					if (continueWithNextAccount)
+					{
+						_finished = false;
+						await PrepareBotForCyclingAsync(ct);
+						return !ct.IsCancellationRequested;
+					}
+					return false;
+				}
+				Logger.Warning($"Finished all {_config.BotList.Count} bots!", _instanceId);
 			_finished = true;
 			_running = false;
-			await CloseControllerAsync();
+			if (!_keepBrowserOnFinish) await CloseControllerAsync();
 			this.OnFinished?.Invoke(_instanceId);
 			return false;
 		}

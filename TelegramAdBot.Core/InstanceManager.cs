@@ -148,6 +148,27 @@ public class InstanceManager
 		await Task.WhenAll(tasks);
 	}
 
+	public async Task<bool> SwitchAccountAsync(int accountNumber)
+	{
+		if (_engines.Count != 1 || !_engines[0].IsBrowserAlive) return false;
+		return await _engines[0].SwitchAccountAsync(accountNumber);
+	}
+
+	public void KeepBrowserOnFinish()
+	{
+		if (_engines.Count == 1) _engines[0].KeepBrowserOnFinish();
+	}
+
+	public void SetRunForNextAccount()
+	{
+		if (_engines.Count == 1) _engines[0].ResetForNextAccount();
+	}
+
+	public void SetAccountCompletionHandler(Func<int, Task<bool>> handler)
+	{
+		if (_engines.Count == 1) _engines[0].OnAccountWorkFinished += handler;
+	}
+
 	private void PrintMissingPositions()
 	{
 		Console.WriteLine();

@@ -8,6 +8,7 @@ public sealed class PromotionRunConfiguration
     public List<string> SelectedBots { get; set; } = new();
     public int InstanceCount { get; set; }
     public int CyclesPerBot { get; set; }
+    public int AccountCount { get; set; } = 1;
 }
 
 public sealed class PromotionStatus
@@ -21,6 +22,8 @@ public sealed class PromotionStatus
     public List<string> SelectedBots { get; set; } = new();
     public int InstanceCount { get; set; }
     public int CyclesPerBot { get; set; }
+    public int CurrentAccount { get; set; } = 1;
+    public int AccountCount { get; set; } = 1;
     public int TotalCycles { get; set; }
     public int CompletedCycles { get; set; }
     public int FailedCycles { get; set; }

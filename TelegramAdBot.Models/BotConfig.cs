@@ -74,6 +74,15 @@ public class BotConfig
 
 	public int StickerY { get; set; }
 
+	public int AccountMenuX { get; set; } = 80;
+	public int AccountMenuY { get; set; } = 274;
+	public int Account1X { get; set; } = 134;
+	public int Account1Y { get; set; } = 321;
+	public int Account2X { get; set; } = 142;
+	public int Account2Y { get; set; } = 358;
+	public int Account3X { get; set; } = 152;
+	public int Account3Y { get; set; } = 392;
+
 	public bool AllSet
 	{
 		get

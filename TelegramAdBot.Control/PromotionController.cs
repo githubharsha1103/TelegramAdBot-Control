@@ -20,6 +20,8 @@ public sealed class PromotionController
     private DateTimeOffset? _startedAt;
     private bool _isStopping;
     private string _lastError = "";
+    private int _currentAccount = 1;
+    private bool _accountSwitching;
 
     public PromotionController(BotConfig config, BotConfigManager? botConfig = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); }
 
@@ -42,14 +44,16 @@ public sealed class PromotionController
             if (requested.Any(x => !available.Contains(x, StringComparer.OrdinalIgnoreCase))) return Fail("One or more selected bots are no longer available.");
             if (run.InstanceCount < 1 || run.InstanceCount > 20) return Fail("Instance count must be between 1 and 20.");
             if (run.CyclesPerBot < 1 || run.CyclesPerBot > 100000) return Fail("Cycles per bot must be between 1 and 100000.");
+            if (run.AccountCount < 1 || run.AccountCount > 3) return Fail("Select 1, 2, or 3 Telegram accounts.");
 
-            _run = new PromotionRunConfiguration { SelectedBots = requested, InstanceCount = run.InstanceCount, CyclesPerBot = run.CyclesPerBot };
+            _run = new PromotionRunConfiguration { SelectedBots = requested, InstanceCount = run.InstanceCount, CyclesPerBot = run.CyclesPerBot, AccountCount = run.AccountCount };
             _config.BotList = requested;
             _config.InstanceCount = run.InstanceCount;
             _config.CyclesPerBot = run.CyclesPerBot;
             _manager = null;
             _startedAt = null;
             _lastError = "";
+            _currentAccount = 1;
             Logger.Info("[CONTROL] Configuration received.");
             return Ok("Configuration accepted.");
         }
@@ -66,7 +70,11 @@ public sealed class PromotionController
             if (_run == null) return Fail("Configure a promotion run first.");
             if (!_config.AllSet) return Fail("Engine setup is incomplete: click positions are not configured.");
 
+            // Account switching is serialized through one existing engine and browser context.
+            _config.InstanceCount = 1;
             _manager = new InstanceManager(_config);
+            _manager.KeepBrowserOnFinish();
+            _manager.SetAccountCompletionHandler(_ => AdvanceAccountAsync());
             _manager.OnAllFinished += () => Logger.Info("[CONTROL] All promotion instances completed.");
             Logger.Info("[CONTROL] START requested.");
             await _manager.OpenAllAsync();
@@ -82,6 +90,35 @@ public sealed class PromotionController
             return Fail("Start failed: " + ex.Message);
         }
         finally { _commandLock.Release(); }
+    }
+
+    private async Task<bool> AdvanceAccountAsync()
+    {
+        if (_run == null || _currentAccount >= _run.AccountCount || _isStopping) return false;
+        _accountSwitching = true;
+        int next = _currentAccount + 1;
+        Logger.Info($"[CONTROL] Switching to account {next}/{_run.AccountCount}.");
+        try
+        {
+            if (_manager == null || !await _manager.SwitchAccountAsync(next))
+            {
+                _lastError = $"Account switch to {next} failed; promotion halted safely.";
+                Logger.Error("[CONTROL] " + _lastError);
+                return false;
+            }
+            _currentAccount = next;
+            _manager.SetRunForNextAccount();
+            if (_manager.Engines.Count == 1)
+                await _manager.Engines[0].StartLoopAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _lastError = $"Account switch to {next} failed: {ex.Message}";
+            Logger.Error("[CONTROL] " + _lastError);
+            return false;
+        }
+        finally { _accountSwitching = false; }
     }
 
     public async Task<ControlResult> PauseAsync()
@@ -135,8 +172,10 @@ public sealed class PromotionController
         {
             IsConfigured = _run != null,
             IsRunning = manager?.AnyRunning == true,
-            IsPaused = manager?.AnyRunning == true && manager.Engines.Where(x => x.IsRunning).All(x => x.IsPaused),
             IsStopping = _isStopping,
+            CurrentAccount = _currentAccount,
+            AccountCount = _run?.AccountCount ?? 1,
+            IsPaused = _accountSwitching || (manager?.AnyRunning == true && manager.Engines.Where(x => x.IsRunning).All(x => x.IsPaused)),
             StartTime = started,
             RuntimeSeconds = started.HasValue ? (long)(DateTimeOffset.UtcNow - started.Value).TotalSeconds : 0,
             SelectedBots = _run?.SelectedBots.ToList() ?? new List<string>(),

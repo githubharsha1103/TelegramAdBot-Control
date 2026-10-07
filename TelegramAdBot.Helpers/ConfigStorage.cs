@@ -21,7 +21,11 @@ public static class ConfigStorage
 				StickerTabX = config.StickerTabX,
 				StickerTabY = config.StickerTabY,
 				StickerX = config.StickerX,
-				StickerY = config.StickerY
+				StickerY = config.StickerY,
+				AccountMenuX = config.AccountMenuX, AccountMenuY = config.AccountMenuY,
+				Account1X = config.Account1X, Account1Y = config.Account1Y,
+				Account2X = config.Account2X, Account2Y = config.Account2Y,
+				Account3X = config.Account3X, Account3Y = config.Account3Y
 			}, AppJsonContext.Default.SavedPositions);
 			File.WriteAllText(AppDataPaths.ConfigFile, json);
 			Logger.Success("Positions saved to AppData.");
@@ -54,6 +58,10 @@ public static class ConfigStorage
 			config.StickerTabY = data.StickerTabY;
 			config.StickerX = data.StickerX;
 			config.StickerY = data.StickerY;
+			config.AccountMenuX = data.AccountMenuX; config.AccountMenuY = data.AccountMenuY;
+			config.Account1X = data.Account1X; config.Account1Y = data.Account1Y;
+			config.Account2X = data.Account2X; config.Account2Y = data.Account2Y;
+			config.Account3X = data.Account3X; config.Account3Y = data.Account3Y;
 			Logger.Success("Positions loaded:");
 			Logger.Info($"Textbox     : ({config.TextboxX},{config.TextboxY})");
 			Logger.Info($"EmojiButton : ({config.EmojiButtonX},{config.EmojiButtonY})");
