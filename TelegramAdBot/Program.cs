@@ -545,6 +545,55 @@ internal class Program
 				});
 			});
 		});
+		_hotkeys.Register(CA, 49u, "Ctrl+Alt+1 (Account 1)", delegate
+		{
+			Task.Run(async delegate
+			{
+				await _manager.PickAsync("ACCOUNT 1", delegate(int x, int y)
+				{
+					_config.Account1X = x;
+					_config.Account1Y = y;
+					ConfigStorage.SavePositions(_config);
+					PrintAccountCoordinates();
+				});
+			});
+		});
+		_hotkeys.Register(CA, 50u, "Ctrl+Alt+2 (Account 2)", delegate
+		{
+			Task.Run(async delegate
+			{
+				await _manager.PickAsync("ACCOUNT 2", delegate(int x, int y)
+				{
+					_config.Account2X = x;
+					_config.Account2Y = y;
+					ConfigStorage.SavePositions(_config);
+					PrintAccountCoordinates();
+				});
+			});
+		});
+		_hotkeys.Register(CA, 51u, "Ctrl+Alt+3 (Account 3)", delegate
+		{
+			Task.Run(async delegate
+			{
+				await _manager.PickAsync("ACCOUNT 3", delegate(int x, int y)
+				{
+					_config.Account3X = x;
+					_config.Account3Y = y;
+					ConfigStorage.SavePositions(_config);
+					PrintAccountCoordinates();
+				});
+			});
+		});
 		_hotkeys.Start();
+	}
+
+	private static void PrintAccountCoordinates()
+	{
+		Logger.Info($"Account 1: {_config.Account1X},{_config.Account1Y}");
+		Logger.Info($"Account 2: {_config.Account2X},{_config.Account2Y}");
+		Logger.Info($"Account 3: {_config.Account3X},{_config.Account3Y}");
+		Console.WriteLine($"Account 1: {_config.Account1X},{_config.Account1Y}");
+		Console.WriteLine($"Account 2: {_config.Account2X},{_config.Account2Y}");
+		Console.WriteLine($"Account 3: {_config.Account3X},{_config.Account3Y}");
 	}
 }

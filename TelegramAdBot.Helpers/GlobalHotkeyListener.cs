@@ -307,6 +307,16 @@ public class GlobalHotkeyListener : IDisposable
             );
         }
 
+        // X11 digit keysyms share the ASCII codes used by Windows VK_0..VK_9.
+        if (windowsVirtualKey >= 0x30 &&
+            windowsVirtualKey <= 0x39)
+        {
+            return XKeysymToKeycode(
+                _display,
+                (nint)windowsVirtualKey
+            );
+        }
+
         return 0;
     }
 
