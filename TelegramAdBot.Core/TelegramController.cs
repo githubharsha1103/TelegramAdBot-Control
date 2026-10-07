@@ -332,49 +332,71 @@ public class TelegramController : IAsyncDisposable
 
 	public async Task<bool> SwitchAccountAsync(int accountNumber)
 	{
+		if (accountNumber < 1 || accountNumber > 3)
+		{
+			Logger.Error($"[AccountSwitch] Invalid account number {accountNumber}.", _instanceId);
+			return false;
+		}
 		int x = accountNumber == 1 ? _config.Account1X : accountNumber == 2 ? _config.Account2X : _config.Account3X;
 		int y = accountNumber == 1 ? _config.Account1Y : accountNumber == 2 ? _config.Account2Y : _config.Account3Y;
 		try
 		{
-			if (_page == null || _page.IsClosed || accountNumber < 1 || accountNumber > 3) return false;
+			if (_page == null || _page.IsClosed) throw new InvalidOperationException("Telegram page is unavailable.");
 			Logger.Info($"[AccountSwitch] Switching to Account {accountNumber}.", _instanceId);
-			var menu = _page.Locator(".popup-container, .popup, .menu-container, .menu, [role='menu'], .account-select").First;
+			Logger.Info($"[AccountSwitch] Opening account menu at X={_config.AccountMenuX} Y={_config.AccountMenuY}.", _instanceId);
 			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
-			Logger.Info("[AccountSwitch] Menu opened.", _instanceId);
+			Logger.Info("[AccountSwitch] Account menu click completed.", _instanceId);
+			Logger.Info("[AccountSwitch] Waiting for account menu to open.", _instanceId);
+			await Task.Delay(750);
+			Logger.Info($"[AccountSwitch] Clicking Account {accountNumber} at X={x} Y={y}.", _instanceId);
 			await _page.Mouse.ClickAsync(x, y);
+			Logger.Info($"[AccountSwitch] Account {accountNumber} click completed.", _instanceId);
 			Logger.Info("[AccountSwitch] Waiting 5 seconds for Telegram account switch.", _instanceId);
 			await Task.Delay(TimeSpan.FromSeconds(5));
 			Logger.Info($"[AccountSwitch] Verifying Account {accountNumber}.", _instanceId);
 			int activeAfter = 0;
+			bool verificationMenuOpen = false;
 			for (int attempt = 1; attempt <= 5; attempt++)
 			{
 				try
 				{
-					if (!await menu.IsVisibleAsync())
+					activeAfter = await ReadActiveAccountMarkerAsync();
+					verificationMenuOpen |= activeAfter != 0;
+					if (activeAfter == 0 && !verificationMenuOpen)
 					{
+						Logger.Info("[AccountSwitch] Opening account menu for coordinate-based verification.", _instanceId);
 						await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-						await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
+						verificationMenuOpen = true;
+						await Task.Delay(750);
+						activeAfter = await ReadActiveAccountMarkerAsync();
+						verificationMenuOpen |= activeAfter != 0;
 					}
-					activeAfter = await ReadActiveAccountMarkerAsync(menu);
 				}
 				catch (Exception verifyError)
 				{
 					Logger.Warning($"[AccountSwitch] Verification attempt {attempt}/5 failed: {verifyError.Message}", _instanceId);
 				}
-				if (activeAfter == accountNumber) break;
+				if (activeAfter == accountNumber)
+				{
+					Logger.Info($"[AccountSwitch] Account {accountNumber} verified.", _instanceId);
+					if (verificationMenuOpen)
+					{
+						await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
+						await Task.Delay(500);
+						Logger.Info("[AccountSwitch] Account menu closed.", _instanceId);
+					}
+					if (!await WaitForTelegramReadyAsync()) throw new InvalidOperationException("Telegram UI did not become ready after account verification.");
+					return true;
+				}
 				Logger.Warning($"[AccountSwitch] Verification attempt {attempt}/5 observed Account {activeAfter}; retrying.", _instanceId);
 				if (attempt < 5) await Task.Delay(1000);
 			}
-			if (activeAfter != accountNumber) throw new InvalidOperationException($"Requested Account {accountNumber}, but Telegram active-account marker reports Account {activeAfter} after bounded retries.");
-			Logger.Info($"[AccountSwitch] Account {accountNumber} verified.", _instanceId);
-			if (await menu.IsVisibleAsync())
+			if (verificationMenuOpen)
 			{
 				await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-				await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 5000 });
+				await Task.Delay(500);
 			}
-			if (!await WaitForTelegramReadyAsync()) throw new InvalidOperationException("Telegram UI did not become ready after account verification.");
-			return true;
+			throw new InvalidOperationException($"Requested Account {accountNumber}, but coordinate-based verification reported Account {activeAfter} after 5 attempts.");
 		}
 		catch (Exception ex)
 		{
@@ -383,9 +405,10 @@ public class TelegramController : IAsyncDisposable
 		}
 	}
 
-	private async Task<int> ReadActiveAccountMarkerAsync(ILocator menu)
+	private async Task<int> ReadActiveAccountMarkerAsync()
 	{
-		return await menu.EvaluateAsync<int>(@"(element, args) => {
+		if (_page == null || _page.IsClosed) return 0;
+		return await _page.EvaluateAsync<int>(@"(args) => {
 			const points = [
 				{ account: 1, x: args.account1X, y: args.account1Y },
 				{ account: 2, x: args.account2X, y: args.account2Y },
@@ -403,9 +426,8 @@ public class TelegramController : IAsyncDisposable
 			};
 			for (const point of points) {
 				const hit = document.elementFromPoint(point.x, point.y);
-				if (!hit || !element.contains(hit)) continue;
-				for (let node = hit; node && node !== element.parentElement; node = node.parentElement) {
-					if (node === element) break;
+				if (!hit) continue;
+				for (let node = hit; node && node !== document.body; node = node.parentElement) {
 					if (hasActiveMarker(node)) return point.account;
 				}
 			}
