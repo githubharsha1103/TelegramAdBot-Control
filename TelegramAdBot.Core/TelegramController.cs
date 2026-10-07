@@ -353,91 +353,14 @@ public class TelegramController : IAsyncDisposable
 			Logger.Info($"[AccountSwitch] Account {accountNumber} click completed.", _instanceId);
 			Logger.Info("[AccountSwitch] Waiting 5 seconds for Telegram account switch.", _instanceId);
 			await Task.Delay(TimeSpan.FromSeconds(5));
-			Logger.Info($"[AccountSwitch] Verifying Account {accountNumber}.", _instanceId);
-			int activeAfter = 0;
-			bool verificationMenuOpen = false;
-			for (int attempt = 1; attempt <= 5; attempt++)
-			{
-				try
-				{
-					activeAfter = await ReadActiveAccountMarkerAsync();
-					verificationMenuOpen |= activeAfter != 0;
-					if (activeAfter == 0 && !verificationMenuOpen)
-					{
-						Logger.Info("[AccountSwitch] Opening account menu for coordinate-based verification.", _instanceId);
-						await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-						verificationMenuOpen = true;
-						await Task.Delay(750);
-						activeAfter = await ReadActiveAccountMarkerAsync();
-						verificationMenuOpen |= activeAfter != 0;
-					}
-				}
-				catch (Exception verifyError)
-				{
-					Logger.Warning($"[AccountSwitch] Verification attempt {attempt}/5 failed: {verifyError.Message}", _instanceId);
-				}
-				if (activeAfter == accountNumber)
-				{
-					Logger.Info($"[AccountSwitch] Account {accountNumber} verified.", _instanceId);
-					if (verificationMenuOpen)
-					{
-						await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-						await Task.Delay(500);
-						Logger.Info("[AccountSwitch] Account menu closed.", _instanceId);
-					}
-					if (!await WaitForTelegramReadyAsync()) throw new InvalidOperationException("Telegram UI did not become ready after account verification.");
-					return true;
-				}
-				Logger.Warning($"[AccountSwitch] Verification attempt {attempt}/5 observed Account {activeAfter}; retrying.", _instanceId);
-				if (attempt < 5) await Task.Delay(1000);
-			}
-			if (verificationMenuOpen)
-			{
-				await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-				await Task.Delay(500);
-			}
-			throw new InvalidOperationException($"Requested Account {accountNumber}, but coordinate-based verification reported Account {activeAfter} after 5 attempts.");
+			Logger.Info($"[AccountSwitch] Account {accountNumber} switch wait completed.", _instanceId);
+			return true;
 		}
 		catch (Exception ex)
 		{
 			Logger.Error($"[AccountSwitch] Account {accountNumber} switch failed: {ex.Message}", _instanceId);
 			return false;
 		}
-	}
-
-	private async Task<int> ReadActiveAccountMarkerAsync()
-	{
-		if (_page == null || _page.IsClosed) return 0;
-		return await _page.EvaluateAsync<int>(@"(args) => {
-			const points = [
-				{ account: 1, x: args.account1X, y: args.account1Y },
-				{ account: 2, x: args.account2X, y: args.account2Y },
-				{ account: 3, x: args.account3X, y: args.account3Y }
-			];
-			const hasActiveMarker = node => {
-				const cls = String(node.className || '').toLowerCase();
-				const ariaCurrent = String(node.getAttribute('aria-current') || '').toLowerCase();
-				const ariaSelected = String(node.getAttribute('aria-selected') || '').toLowerCase();
-				const ariaChecked = String(node.getAttribute('aria-checked') || '').toLowerCase();
-				const dataState = String(node.getAttribute('data-state') || '').toLowerCase();
-				return /(^|[-_ ])(active|current|selected)([-_ ]|$)/.test(cls) ||
-					ariaCurrent === 'true' || ariaCurrent === 'page' || ariaSelected === 'true' || ariaChecked === 'true' || dataState === 'active' ||
-					!!node.querySelector(""[aria-current='true'], [aria-selected='true'], [aria-checked='true'], .active, .current, .selected"");
-			};
-			for (const point of points) {
-				const hit = document.elementFromPoint(point.x, point.y);
-				if (!hit) continue;
-				for (let node = hit; node && node !== document.body; node = node.parentElement) {
-					if (hasActiveMarker(node)) return point.account;
-				}
-			}
-			return 0;
-		}", new
-		{
-			account1X = _config.Account1X, account1Y = _config.Account1Y,
-			account2X = _config.Account2X, account2Y = _config.Account2Y,
-			account3X = _config.Account3X, account3Y = _config.Account3Y
-		});
 	}
 
 	public async Task<(int x, int y)?> PickPositionAsync(string label)
