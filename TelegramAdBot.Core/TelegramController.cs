@@ -88,6 +88,7 @@ public class TelegramController : IAsyncDisposable
 				WaitUntil = WaitUntilState.NetworkIdle,
 				Timeout = 30000f
 			});
+			await Task.Delay(TimeSpan.FromSeconds(5));
 			Logger.Success("Browser launched.", _instanceId);
 			return true;
 		}
