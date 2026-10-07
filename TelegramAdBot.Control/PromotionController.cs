@@ -39,7 +39,7 @@ public sealed class PromotionController
         {
             if (_manager?.AnyRunning == true || _isStopping)
                 return Fail("Promotion is active; stop it before changing the configuration.");
-            if (_manager?.AnyBrowserAlive == true)
+            if (_manager?.HasBrowserResources == true || _manager?.AnyRunning == true)
                 await _manager.StopAllAsync();
 
             var available = _botConfig.GetBots();
@@ -70,6 +70,7 @@ public sealed class PromotionController
     public async Task<ControlResult> StartAsync()
     {
         await _commandLock.WaitAsync();
+        bool started = false;
         try
         {
             if (_isStopping) return Fail("Promotion is stopping.");
@@ -80,7 +81,6 @@ public sealed class PromotionController
             // Account switching is serialized through one existing engine and browser context.
             _config.InstanceCount = 1;
             _manager = new InstanceManager(_config);
-            _manager.KeepBrowserOnFinish();
             _manager.ConfigureAccounts(_run.SelectedAccounts);
             _manager.SetAccountCompletionHandler(_ => AdvanceAccountAsync());
             _manager.OnAllFinished += () => Logger.Info("[CONTROL] All promotion instances completed.");
@@ -103,6 +103,7 @@ public sealed class PromotionController
             _accountState = $"Account {firstAccount} promotion running...";
             Logger.Info($"[Promotion] Starting promotion for Account {firstAccount}.");
             if (!await _manager.StartSequentialAsync()) return Fail("Promotion engine failed to start.");
+            started = true;
             return Ok("Promotion started.");
         }
         catch (Exception ex)
@@ -111,7 +112,19 @@ public sealed class PromotionController
             Logger.Error("[CONTROL] START failed: " + ex.Message);
             return Fail("Start failed: " + ex.Message);
         }
-        finally { _commandLock.Release(); }
+        finally
+        {
+            if (!started && _manager != null)
+            {
+                try { await _manager.CleanupAsync(); }
+                catch (Exception cleanupEx)
+                {
+                    _lastError = string.IsNullOrEmpty(_lastError) ? cleanupEx.Message : _lastError + " | Cleanup: " + cleanupEx.Message;
+                    Logger.Error("[Cleanup] Browser cleanup failed: " + cleanupEx.Message);
+                }
+            }
+            _commandLock.Release();
+        }
     }
 
     private async Task<bool> AdvanceAccountAsync()
@@ -189,10 +202,12 @@ public sealed class PromotionController
         await _commandLock.WaitAsync();
         try
         {
-            if (_manager == null || (!_manager.AnyBrowserAlive && !_manager.AnyRunning)) return Fail("Promotion is already stopped.");
+            if (_manager == null || (!_manager.HasBrowserResources && !_manager.AnyRunning)) return Fail("Promotion is already stopped.");
             _isStopping = true;
             Logger.Info("[CONTROL] STOP requested.");
-            await _manager.StopAllAsync();
+            await _manager.CleanupAsync();
+            if (_manager.HasBrowserResources || _manager.AnyBrowserAlive)
+                throw new InvalidOperationException("Browser resources remain after cleanup verification.");
             return Ok("Promotion stopped.");
         }
         catch (Exception ex) { _lastError = ex.Message; return Fail("Stop failed: " + ex.Message); }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using TelegramAdBot.Helpers;
 using TelegramAdBot.Models;
@@ -16,8 +17,12 @@ public class InstanceManager
 	private int _finishedCount;
 
 	private readonly object _finishLock = new object();
+	private readonly SemaphoreSlim _cleanupLock = new SemaphoreSlim(1, 1);
+	private bool _cleanupVerified;
 
 	public bool AnyBrowserAlive => _engines.Any((BotEngine e) => e.IsBrowserAlive);
+
+	public bool HasBrowserResources => _engines.Any((BotEngine e) => e.HasBrowserResources);
 
 	public bool AnyRunning => _engines.Any((BotEngine e) => e.IsRunning);
 
@@ -166,11 +171,6 @@ public class InstanceManager
 	public async Task<bool> InitializeSequentialAsync() => _engines.Count == 1 && await _engines[0].InitializeCurrentAccountAsync();
 	public void ConfigureAccounts(IReadOnlyList<int> accounts) { foreach (BotEngine engine in _engines) engine.ConfigureAccounts(accounts); }
 
-	public void KeepBrowserOnFinish()
-	{
-		if (_engines.Count == 1) _engines[0].KeepBrowserOnFinish();
-	}
-
 	public void SetRunForNextAccount()
 	{
 		if (_engines.Count == 1) _engines[0].ResetForNextAccount();
@@ -234,11 +234,43 @@ public class InstanceManager
 		}
 	}
 
-	public async Task StopAllAsync()
+	public Task StopAllAsync() => CleanupAsync();
+
+	public async Task CleanupAsync()
 	{
-		Logger.Info("Stopping all...");
-		await Task.WhenAll(_engines.Select((BotEngine e) => e.FullStopAsync()));
-		Logger.Warning("All stopped.");
+		await _cleanupLock.WaitAsync();
+		try
+		{
+			if (_cleanupVerified && !HasBrowserResources) return;
+			Logger.Info("[Cleanup] Promotion run stopping...");
+			Logger.Info("[Cleanup] Stopping active instances...");
+			var errors = new List<Exception>();
+			foreach (BotEngine engine in _engines)
+			{
+				try { await engine.FullStopAsync(); }
+				catch (Exception ex) { errors.Add(ex); Logger.Error("[Cleanup] Instance cleanup error: " + ex.Message, engine.InstanceId); }
+			}
+			if (HasBrowserResources || AnyBrowserAlive)
+			{
+				Logger.Warning("[Cleanup] Browser resources remain; retrying cleanup.");
+				foreach (BotEngine engine in _engines.Where(e => e.HasBrowserResources || e.IsBrowserAlive))
+				{
+					try { await engine.FullStopAsync(); }
+					catch (Exception ex) { errors.Add(ex); Logger.Error("[Cleanup] Retry failed: " + ex.Message, engine.InstanceId); }
+				}
+			}
+			if (HasBrowserResources || AnyBrowserAlive)
+			{
+				string reason = "One or more browser resources remain alive after cleanup.";
+				Logger.Error("[Cleanup] Browser cleanup failed: " + reason);
+				throw new InvalidOperationException(reason, errors.FirstOrDefault());
+			}
+			if (errors.Count > 0) Logger.Warning("[Cleanup] A disposal attempt reported an error, but all browser resources were verified closed.");
+			_cleanupVerified = true;
+			Logger.Info("[Cleanup] Browser cleanup completed");
+			Logger.Info("[Cleanup] Browser verified closed");
+		}
+		finally { _cleanupLock.Release(); }
 	}
 
 	public BotEngine? GetInstance(int id)

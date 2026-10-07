@@ -16,12 +16,18 @@ public class TelegramController : IAsyncDisposable
 	private IBrowserContext? _context;
 
 	private IPage? _page;
+	private readonly System.Threading.SemaphoreSlim _disposeLock = new(1, 1);
+	private bool _disposeCompleted;
 
 	private readonly BotConfig _config;
 
 	private readonly int _instanceId;
 
 	private const string SEL_CHAT_LIST = ".chatlist-container,.chat-list,#column-left";
+
+	public bool HasResources => _page != null || _context != null || _playwright != null;
+
+	public bool IsDisposed => _disposeCompleted && !HasResources;
 
 	public TelegramController(BotConfig config, int instanceId)
 	{
@@ -88,6 +94,8 @@ public class TelegramController : IAsyncDisposable
 		catch (Exception ex)
 		{
 			Logger.Error("Browser init error: " + ex.Message, _instanceId);
+			try { await DisposeAsync(); }
+			catch (Exception cleanupError) { Logger.Error("[Cleanup] Browser cleanup failed after initialization error: " + cleanupError.Message, _instanceId); }
 			return false;
 		}
 	}
@@ -531,22 +539,75 @@ public class TelegramController : IAsyncDisposable
 
 	public async ValueTask DisposeAsync()
 	{
+		await _disposeLock.WaitAsync();
 		try
 		{
-			Logger.Info($"Closing browser {_instanceId}...", _instanceId);
-			if (_context != null)
+			if (_disposeCompleted) return;
+			Logger.Info("[Cleanup] Closing Playwright pages/contexts...", _instanceId);
+			var context = _context;
+			var pages = context?.Pages ?? Array.Empty<IPage>();
+			var cleanupErrors = new List<string>();
+			foreach (var page in pages)
 			{
-				await _context.CloseAsync();
-				_context = null;
+				try
+				{
+					if (!page.IsClosed) await page.CloseAsync();
+				}
+				catch (Exception ex)
+				{
+					if (!page.IsClosed) cleanupErrors.Add("Page close: " + ex.Message);
+				}
 			}
-			_playwright?.Dispose();
-			_playwright = null;
-			_page = null;
-			Logger.Info($"Browser {_instanceId} closed.", _instanceId);
+
+			IBrowser? browser = context?.Browser;
+			if (context != null)
+			{
+				try
+				{
+					await context.CloseAsync();
+					_context = null;
+				}
+				catch (Exception ex)
+				{
+					cleanupErrors.Add("Context close: " + ex.Message);
+				}
+			}
+
+			Logger.Info("[Cleanup] Closing Chromium browser...", _instanceId);
+			if (browser != null && browser.IsConnected)
+			{
+				try { await browser.CloseAsync(); }
+				catch (Exception ex) { cleanupErrors.Add("Browser close: " + ex.Message); }
+			}
+			// LaunchPersistentContextAsync owns its Chromium process; closing that context closes Chromium.
+			try { _playwright?.Dispose(); _playwright = null; }
+			catch (Exception ex) { cleanupErrors.Add("Playwright dispose: " + ex.Message); }
+
+			bool pagesClosed = true;
+			foreach (var page in pages)
+			{
+				try { pagesClosed &= page.IsClosed; }
+				catch { pagesClosed = false; }
+			}
+			bool browserClosed = browser == null || !browser.IsConnected;
+			if (_context == null && pagesClosed && browserClosed && _playwright == null)
+			{
+				_page = null;
+				_disposeCompleted = true;
+				Logger.Info("[Cleanup] Browser cleanup completed", _instanceId);
+				Logger.Info("[Cleanup] Browser verified closed", _instanceId);
+			}
+			else
+			{
+				cleanupErrors.Add("Browser resources remain alive after disposal.");
+			}
+			if (cleanupErrors.Count > 0)
+			{
+				string reason = string.Join("; ", cleanupErrors);
+				Logger.Error("[Cleanup] Browser cleanup failed: " + reason, _instanceId);
+				throw new InvalidOperationException(reason);
+			}
 		}
-		catch (Exception ex)
-		{
-			Logger.Warning("Dispose error: " + ex.Message, _instanceId);
-		}
+		finally { _disposeLock.Release(); }
 	}
 }

@@ -25,7 +25,6 @@ public class BotEngine
 	private volatile bool _paused;
 
 	private volatile bool _finished;
-	private bool _keepBrowserOnFinish;
 	private IReadOnlyList<int> _selectedAccounts = new[] { 1 };
 	private int _selectedAccountIndex;
 	private int _currentAccount = 1;
@@ -55,6 +54,7 @@ public class BotEngine
 	public bool IsFinished => _finished;
 
 	public bool IsBrowserAlive => _controller?.IsBrowserOpen() ?? false;
+	public bool HasBrowserResources => _controller?.HasResources ?? false;
 
 	public TelegramController? Controller => _controller;
 
@@ -75,7 +75,6 @@ public class BotEngine
 	public void SetSelectedAccountIndex(int index) { _selectedAccountIndex = index; if (index >= 0 && index < _selectedAccounts.Count) _currentAccount = _selectedAccounts[index]; }
 	public void MarkAccountInitializedAtBoundary() { _accountInitializedAtBoundary = true; _initializedForNextLoop = false; }
 
-	public void KeepBrowserOnFinish() => _keepBrowserOnFinish = true;
 	public async Task<bool> SwitchAccountAsync(int accountNumber)
 	{
 		if (_controller == null) return false;
@@ -241,17 +240,26 @@ public class BotEngine
 		_running = false;
 		_paused = false;
 		_cts?.Cancel();
+		Exception? cleanupError = null;
+		try { await CloseControllerAsync(); }
+		catch (Exception ex) { cleanupError = ex; }
 		if (_loopTask != null)
 		{
 			try
 			{
-				await _loopTask.WaitAsync(TimeSpan.FromSeconds(5.0));
+				await _loopTask.WaitAsync(TimeSpan.FromSeconds(10.0));
 			}
-			catch
+			catch (TimeoutException)
 			{
+				Logger.Error("[Cleanup] Engine loop did not stop within 10 seconds after browser closure.", _instanceId);
+			}
+			catch (Exception ex)
+			{
+				Logger.Warning("Engine loop ended with error during cleanup: " + ex.Message, _instanceId);
 			}
 		}
-		await CloseControllerAsync();
+		_finished = true;
+		if (cleanupError != null) throw new InvalidOperationException("Engine browser cleanup failed.", cleanupError);
 		Logger.Warning("STOPPED.", _instanceId);
 	}
 
@@ -293,6 +301,8 @@ public class BotEngine
 
 	private async Task RunLoopAsync(CancellationToken ct, int initialDelayMs)
 	{
+		try
+		{
 		if (initialDelayMs > 0)
 		{
 			Logger.Info($"Stagger wait {initialDelayMs}ms...", _instanceId);
@@ -412,6 +422,19 @@ public class BotEngine
 		}
 		_running = false;
 		Logger.Warning("Loop ended.", _instanceId);
+		}
+		catch (Exception ex)
+		{
+			Logger.Error("Fatal promotion loop error: " + ex.Message, _instanceId);
+			_finished = true;
+		}
+		finally
+		{
+			_running = false;
+			_finished = true;
+			await CloseControllerAsync();
+			OnFinished?.Invoke(_instanceId);
+		}
 	}
 
 	private async Task<bool> SwitchToNextBotAsync(CancellationToken ct)
@@ -431,8 +454,6 @@ public class BotEngine
 				Logger.Warning($"Finished all {_config.BotList.Count} bots!", _instanceId);
 			_finished = true;
 			_running = false;
-			if (!_keepBrowserOnFinish) await CloseControllerAsync();
-			this.OnFinished?.Invoke(_instanceId);
 			return false;
 		}
 		string currentBotUsername = _currentBotUsername;
@@ -464,11 +485,10 @@ public class BotEngine
 
 	private async Task CloseControllerAsync()
 	{
-		if (_controller != null)
-		{
-			await _controller.DisposeAsync();
-			_controller = null;
-		}
+		TelegramController? controller = _controller;
+		if (controller == null) return;
+		await controller.DisposeAsync();
+		if (controller.IsDisposed) System.Threading.Interlocked.CompareExchange(ref _controller, null, controller);
 	}
 
 	private async Task<bool> Wait(int ms, CancellationToken ct)
