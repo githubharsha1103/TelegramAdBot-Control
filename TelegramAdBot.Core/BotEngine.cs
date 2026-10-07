@@ -85,9 +85,11 @@ public class BotEngine
 	public void ResetForNextAccount()
 	{
 		_cyclesOnCurrentBot = 0;
-			_currentBotIndex = 0;
-			_currentBotUsername = _config.BotList.Count > 0 ? _config.BotList[0] : "";
-			_promoIndex = _instanceId - 1;
+		_currentBotIndex = 0;
+		_currentBotUsername = _config.BotList.Count > 0 ? _config.BotList[0] : "";
+		_promoIndex = _instanceId - 1;
+		_initializedForNextLoop = false;
+		_accountInitializedAtBoundary = false;
 		_finished = false;
 		_running = false;
 	}
@@ -172,8 +174,15 @@ public class BotEngine
 			if (_controller == null || !await _controller.WaitForTelegramReadyAsync())
 				throw new InvalidOperationException("Telegram page was not ready.");
 			Logger.Info($"[PromotionInit] Starting fresh initialization for Account {_currentAccount}.", _instanceId);
-			Logger.Info("[PromotionInit] Searching for bot...", _instanceId);
-			if (!await NavigateToFirstBotAsync()) throw new InvalidOperationException($"Bot @{_currentBotUsername} could not be opened.");
+			bool navigationCompleted = false;
+			for (int attempt = 1; attempt <= 3 && !navigationCompleted; attempt++)
+			{
+				if (attempt > 1) Logger.Warning($"[PromotionInit] Retrying bot search/navigation ({attempt}/3) for @{_currentBotUsername}.", _instanceId);
+				navigationCompleted = await NavigateToFirstBotAsync();
+				if (!navigationCompleted && attempt < 3) await Task.Delay(1000);
+			}
+			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
+			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
 			_initializedForNextLoop = true;

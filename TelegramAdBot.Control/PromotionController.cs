@@ -101,6 +101,7 @@ public sealed class PromotionController
                 return Fail(_lastError);
             }
             _accountState = $"Account {firstAccount} promotion running...";
+            Logger.Info($"[Promotion] Starting promotion for Account {firstAccount}.");
             if (!await _manager.StartSequentialAsync()) return Fail("Promotion engine failed to start.");
             return Ok("Promotion started.");
         }
@@ -142,6 +143,7 @@ public sealed class PromotionController
             if (_manager == null || !await _manager.InitializeSequentialAsync()) throw new InvalidOperationException("Fresh account initialization failed.");
             _manager.Engines[0].MarkAccountInitializedAtBoundary();
             _accountState = $"Account {next} promotion running...";
+            Logger.Info($"[Promotion] Starting promotion for Account {next}.");
             return true;
         }
         catch (Exception ex)

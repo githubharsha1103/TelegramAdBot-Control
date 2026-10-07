@@ -235,7 +235,7 @@ public class TelegramController : IAsyncDisposable
 				return false;
 			}
 			string clean = botUsername.TrimStart('@');
-			Logger.Step("Opening chat: @" + clean, _instanceId);
+			Logger.Info($"[PromotionInit] Searching for bot: @{clean}", _instanceId);
 			try
 			{
 				if (!_page.Url.Contains("web.telegram.org"))
@@ -297,17 +297,21 @@ public class TelegramController : IAsyncDisposable
 				Delay = 50f
 			});
 			await Task.Delay(500);
+			var botResult = _page.GetByText(clean, new PageGetByTextOptions { Exact = false }).First;
+			await botResult.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+			Logger.Info("[PromotionInit] Bot search completed.", _instanceId);
+			Logger.Info("[PromotionInit] Opening bot/chat.", _instanceId);
 			await _page.Keyboard.PressAsync("Enter");
 			await Task.Delay(2000);
-			await _page.WaitForTimeoutAsync(500);
-			bool opened = await _page.GetByText(clean, new PageGetByTextOptions { Exact = false }).First.IsVisibleAsync(new LocatorIsVisibleOptions { Timeout = 3000 });
-			if (!opened) throw new InvalidOperationException("Selected bot/chat did not become visible after search.");
+			if (!await WaitForTelegramReadyAsync()) throw new InvalidOperationException("Telegram UI did not become ready after opening the selected bot.");
+			await botResult.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
+			Logger.Info("[PromotionInit] Bot/chat loaded.", _instanceId);
 			Logger.Success("Opened @" + clean, _instanceId);
 			return true;
 		}
 		catch (Exception ex2)
 		{
-			Logger.Warning("Navigation failed: " + ex2.Message, _instanceId);
+			Logger.Warning($"[PromotionInit] Bot search/open failed for @{botUsername}: {ex2.Message}", _instanceId);
 			return false;
 		}
 	}
@@ -330,31 +334,43 @@ public class TelegramController : IAsyncDisposable
 		try
 		{
 			if (_page == null || _page.IsClosed || accountNumber < 1 || accountNumber > 3) return false;
-			Logger.Info($"[AccountSwitch] Opening menu for Account {accountNumber}.", _instanceId);
+			Logger.Info($"[AccountSwitch] Switching to Account {accountNumber}.", _instanceId);
 			var menu = _page.Locator(".popup-container, .popup, .menu-container, .menu, [role='menu'], .account-select").First;
 			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
 			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
 			Logger.Info("[AccountSwitch] Menu opened.", _instanceId);
-			int activeBefore = await ReadActiveAccountMarkerAsync(menu);
-			if (activeBefore < 1) throw new InvalidOperationException("Telegram account menu did not expose a verifiable active-account marker.");
-			if (activeBefore == accountNumber)
+			await _page.Mouse.ClickAsync(x, y);
+			Logger.Info("[AccountSwitch] Waiting 5 seconds for Telegram account switch.", _instanceId);
+			await Task.Delay(TimeSpan.FromSeconds(5));
+			Logger.Info($"[AccountSwitch] Verifying Account {accountNumber}.", _instanceId);
+			int activeAfter = 0;
+			for (int attempt = 1; attempt <= 5; attempt++)
+			{
+				try
+				{
+					if (!await menu.IsVisibleAsync())
+					{
+						await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
+						await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
+					}
+					activeAfter = await ReadActiveAccountMarkerAsync(menu);
+				}
+				catch (Exception verifyError)
+				{
+					Logger.Warning($"[AccountSwitch] Verification attempt {attempt}/5 failed: {verifyError.Message}", _instanceId);
+				}
+				if (activeAfter == accountNumber) break;
+				Logger.Warning($"[AccountSwitch] Verification attempt {attempt}/5 observed Account {activeAfter}; retrying.", _instanceId);
+				if (attempt < 5) await Task.Delay(1000);
+			}
+			if (activeAfter != accountNumber) throw new InvalidOperationException($"Requested Account {accountNumber}, but Telegram active-account marker reports Account {activeAfter} after bounded retries.");
+			Logger.Info($"[AccountSwitch] Account {accountNumber} verified.", _instanceId);
+			if (await menu.IsVisibleAsync())
 			{
 				await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
 				await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 5000 });
-				return true;
 			}
-			await _page.Mouse.ClickAsync(x, y);
-			Logger.Info($"[AccountSwitch] Account {accountNumber} selected; waiting for Telegram readiness.", _instanceId);
-			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 5000 });
-			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-			await _page.Locator("input[type='text']").First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
-			int activeAfter = await ReadActiveAccountMarkerAsync(menu);
-			if (activeAfter != accountNumber) throw new InvalidOperationException($"Requested Account {accountNumber}, but Telegram active-account marker reports Account {activeAfter}.");
-			Logger.Info($"[AccountSwitch] Account {accountNumber} positively verified active.", _instanceId);
-			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
-			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 5000 });
+			if (!await WaitForTelegramReadyAsync()) throw new InvalidOperationException("Telegram UI did not become ready after account verification.");
 			return true;
 		}
 		catch (Exception ex)
@@ -380,7 +396,7 @@ public class TelegramController : IAsyncDisposable
 				const dataState = String(node.getAttribute('data-state') || '').toLowerCase();
 				return /(^|[-_ ])(active|current|selected)([-_ ]|$)/.test(cls) ||
 					ariaCurrent === 'true' || ariaCurrent === 'page' || ariaSelected === 'true' || ariaChecked === 'true' || dataState === 'active' ||
-					!!node.querySelector('[aria-current=''true''], [aria-selected=''true''], [aria-checked=''true''], .active, .current, .selected');
+					!!node.querySelector(""[aria-current='true'], [aria-selected='true'], [aria-checked='true'], .active, .current, .selected"");
 			};
 			for (const point of points) {
 				const hit = document.elementFromPoint(point.x, point.y);
