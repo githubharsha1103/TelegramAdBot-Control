@@ -52,6 +52,7 @@ public sealed class PromotionController
             if (selectedAccounts.Count == 0 || selectedAccounts.Any(x => x < 1 || x > 3)) return Fail("Select at least one valid Telegram account.");
 
             _run = new PromotionRunConfiguration { SelectedBots = requested, InstanceCount = run.InstanceCount, CyclesPerBot = run.CyclesPerBot, SelectedAccounts = selectedAccounts, AccountCount = selectedAccounts.Count };
+            Logger.Info("[Account] Selected accounts: [" + string.Join(",", selectedAccounts) + "]");
             _config.BotList = requested;
             _config.InstanceCount = 1;
             _config.CyclesPerBot = run.CyclesPerBot;
@@ -70,7 +71,6 @@ public sealed class PromotionController
     public async Task<ControlResult> StartAsync()
     {
         await _commandLock.WaitAsync();
-        bool started = false;
         try
         {
             if (_isStopping) return Fail("Promotion is stopping.");
@@ -92,18 +92,19 @@ public sealed class PromotionController
             _currentSelectedAccountIndex = 0;
             int firstAccount = _run.SelectedAccounts[0];
             _accountState = firstAccount == 1 ? "Initializing Account 1..." : $"Switching to Account {firstAccount}...";
+            Logger.Info($"[Account] Starting preparation for Account {firstAccount}; Telegram initially uses Account 1.");
             var engine = _manager.Engines[0];
             engine.SetSelectedAccountIndex(0);
             if (!await engine.PrepareFirstAccountAsync(firstAccount))
             {
                 _lastError = $"Account {firstAccount} preparation/initialization failed.";
                 _accountState = "Failed";
+                Logger.Error("[CONTROL] " + _lastError);
                 return Fail(_lastError);
             }
             _accountState = $"Account {firstAccount} promotion running...";
             Logger.Info($"[Promotion] Starting promotion for Account {firstAccount}.");
             if (!await _manager.StartSequentialAsync()) return Fail("Promotion engine failed to start.");
-            started = true;
             return Ok("Promotion started.");
         }
         catch (Exception ex)
@@ -112,19 +113,7 @@ public sealed class PromotionController
             Logger.Error("[CONTROL] START failed: " + ex.Message);
             return Fail("Start failed: " + ex.Message);
         }
-        finally
-        {
-            if (!started && _manager != null)
-            {
-                try { await _manager.CleanupAsync(); }
-                catch (Exception cleanupEx)
-                {
-                    _lastError = string.IsNullOrEmpty(_lastError) ? cleanupEx.Message : _lastError + " | Cleanup: " + cleanupEx.Message;
-                    Logger.Error("[Cleanup] Browser cleanup failed: " + cleanupEx.Message);
-                }
-            }
-            _commandLock.Release();
-        }
+        finally { _commandLock.Release(); }
     }
 
     private async Task<bool> AdvanceAccountAsync()
@@ -141,6 +130,7 @@ public sealed class PromotionController
         {
             if (_manager == null || !await _manager.SwitchAccountAsync(next))
             {
+                _manager?.Engines[0].RetainBrowserAfterAccountFailure();
                 _lastError = $"Account switch to {next} failed; promotion halted safely.";
                 _accountState = "Failed";
                 Logger.Error("[CONTROL] " + _lastError);
@@ -161,6 +151,7 @@ public sealed class PromotionController
         }
         catch (Exception ex)
         {
+            _manager?.Engines[0].RetainBrowserAfterAccountFailure();
             _lastError = $"Account switch to {next} failed: {ex.Message}";
             _accountState = "Failed";
             Logger.Error("[CONTROL] " + _lastError);

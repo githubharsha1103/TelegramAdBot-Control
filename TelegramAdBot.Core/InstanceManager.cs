@@ -51,7 +51,7 @@ public class InstanceManager
 			_finishedCount++;
 			count = _finishedCount;
 		}
-		Logger.Warning($"Browser closed. ({count}/{_engines.Count} done)", instanceId);
+		Logger.Warning($"Promotion engine finished. ({count}/{_engines.Count} done)", instanceId);
 		if (count >= _engines.Count)
 		{
 			Logger.AllDone();

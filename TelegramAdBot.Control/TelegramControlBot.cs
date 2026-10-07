@@ -2,6 +2,9 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +23,7 @@ public sealed class TelegramControlBot : IDisposable
 
     private readonly long _adminId;
     private readonly TelegramBotClient _bot;
+    private readonly HttpClient _apiHttpClient;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<long, Session> _sessions = new();
     private readonly ConcurrentDictionary<long, int> _statusMessages = new();
@@ -30,7 +34,30 @@ public sealed class TelegramControlBot : IDisposable
     {
         _controller = controller;
         _adminId = adminId;
-        _bot = new TelegramBotClient(token);
+        var handler = new SocketsHttpHandler
+        {
+            ConnectCallback = async (context, cancellationToken) =>
+            {
+                IPAddress[] addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, cancellationToken);
+                IPAddress ipv4Address = addresses.FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork);
+                if (ipv4Address == null)
+                    throw new SocketException((int)SocketError.HostNotFound);
+
+                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                try
+                {
+                    await socket.ConnectAsync(new IPEndPoint(ipv4Address, context.DnsEndPoint.Port), cancellationToken);
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            }
+        };
+        _apiHttpClient = new HttpClient(handler, disposeHandler: true);
+        _bot = new TelegramBotClient(token, _apiHttpClient);
     }
 
     public void Start()
@@ -230,7 +257,7 @@ public sealed class TelegramControlBot : IDisposable
         return b.Append($"\n\u23F1 Runtime: {TimeSpan.FromSeconds(s.RuntimeSeconds):hh\\:mm\\:ss}\n\u26A1 Status: {(s.IsPaused ? "PAUSED" : s.IsRunning ? "RUNNING" : "STOPPED")}").ToString();
     }
     private static Task HandleErrorAsync(ITelegramBotClient _, Exception ex, HandleErrorSource __, CancellationToken ___) { Helpers.Logger.Warning("[CONTROL] Telegram error: " + ex.Message); return Task.CompletedTask; }
-    public void Dispose() { _cts.Cancel(); _cts.Dispose(); }
+    public void Dispose() { _cts.Cancel(); _cts.Dispose(); _apiHttpClient.Dispose(); }
 
     private sealed class Session { public List<string> AvailableBots { get; set; } = new(); public HashSet<string> SelectedBots { get; set; } = new(); public HashSet<int> SelectedAccounts { get; set; } = new(); public int Instances { get; set; } public int Cycles { get; set; } public Step Step { get; set; } }
     private enum Step { Bots, Instances, Cycles, Accounts, Confirm }

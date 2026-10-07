@@ -79,6 +79,7 @@ public class TelegramController : IAsyncDisposable
 					Height = _config.ViewportHeight
 				}
 			});
+			Logger.Info("[Browser] Chromium started.", _instanceId);
 			IReadOnlyList<IPage> pages = _context.Pages;
 			IPage page = ((pages.Count <= 0) ? (await _context.NewPageAsync()) : pages[0]);
 			_page = page;
@@ -88,15 +89,16 @@ public class TelegramController : IAsyncDisposable
 				WaitUntil = WaitUntilState.NetworkIdle,
 				Timeout = 30000f
 			});
+			Logger.Info("[Browser] Telegram Web navigation completed.", _instanceId);
+			Logger.Info("[Browser] Waiting 5 seconds for Telegram Web.", _instanceId);
 			await Task.Delay(TimeSpan.FromSeconds(5));
+			Logger.Success("[Browser] Telegram Web startup wait completed.", _instanceId);
 			Logger.Success("Browser launched.", _instanceId);
 			return true;
 		}
 		catch (Exception ex)
 		{
 			Logger.Error("Browser init error: " + ex.Message, _instanceId);
-			try { await DisposeAsync(); }
-			catch (Exception cleanupError) { Logger.Error("[Cleanup] Browser cleanup failed after initialization error: " + cleanupError.Message, _instanceId); }
 			return false;
 		}
 	}

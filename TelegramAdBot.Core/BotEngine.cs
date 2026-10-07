@@ -32,6 +32,7 @@ public class BotEngine
 	private volatile bool _initializing;
 	private bool _accountInitializedAtBoundary;
 	private bool _initializedForNextLoop;
+	private volatile bool _retainBrowserOnInitFailure;
 
 	private int _totalCycles;
 
@@ -89,9 +90,12 @@ public class BotEngine
 		_promoIndex = _instanceId - 1;
 		_initializedForNextLoop = false;
 		_accountInitializedAtBoundary = false;
+		_retainBrowserOnInitFailure = false;
 		_finished = false;
 		_running = false;
 	}
+
+	public void RetainBrowserAfterAccountFailure() => _retainBrowserOnInitFailure = true;
 
 	public event Action<int>? OnFinished;
 	public event Func<int, Task<bool>>? OnAccountWorkFinished;
@@ -127,6 +131,7 @@ public class BotEngine
 			Logger.Error("Login failed.", _instanceId);
 			return false;
 		}
+		Logger.Success("[Browser] Telegram UI ready.", _instanceId);
 		Logger.Success($"Browser {_instanceId} ready (not navigated yet).", _instanceId);
 		return true;
 	}
@@ -176,6 +181,7 @@ public class BotEngine
 			bool navigationCompleted = false;
 			for (int attempt = 1; attempt <= 3 && !navigationCompleted; attempt++)
 			{
+				Logger.Info($"[Bot] Searching/opening @{_currentBotUsername} (attempt {attempt}/3).", _instanceId);
 				if (attempt > 1) Logger.Warning($"[PromotionInit] Retrying bot search/navigation ({attempt}/3) for @{_currentBotUsername}.", _instanceId);
 				navigationCompleted = await NavigateToFirstBotAsync();
 				if (!navigationCompleted && attempt < 3) await Task.Delay(1000);
@@ -191,6 +197,7 @@ public class BotEngine
 		{
 			Logger.Error($"[PromotionInit] Account {_currentAccount} initialization failed: {ex.Message}", _instanceId);
 			_finished = true;
+			_retainBrowserOnInitFailure = true;
 			return false;
 		}
 		finally { _initializing = false; }
@@ -432,7 +439,8 @@ public class BotEngine
 		{
 			_running = false;
 			_finished = true;
-			await CloseControllerAsync();
+			if (!_retainBrowserOnInitFailure) await CloseControllerAsync();
+			else Logger.Warning("Browser retained for inspection after account preparation failed.", _instanceId);
 			OnFinished?.Invoke(_instanceId);
 		}
 	}
