@@ -148,11 +148,23 @@ public class InstanceManager
 		await Task.WhenAll(tasks);
 	}
 
+	public async Task OpenSequentialBrowserAsync()
+	{
+		if (_engines.Count != 1) throw new InvalidOperationException("Sequential account mode requires one browser engine.");
+		if (!await _engines[0].PrepareBrowserAsync()) throw new InvalidOperationException("Chromium browser could not be prepared.");
+	}
+
 	public async Task<bool> SwitchAccountAsync(int accountNumber)
 	{
 		if (_engines.Count != 1 || !_engines[0].IsBrowserAlive) return false;
 		return await _engines[0].SwitchAccountAsync(accountNumber);
 	}
+
+	public bool IsPaused => _engines.Count == 1 && _engines[0].IsPaused;
+	public void ResumeSequential() { if (_engines.Count == 1) _engines[0].ResumePause(); }
+	public async Task<bool> StartSequentialAsync(int initialDelayMs = 0) => _engines.Count == 1 && await _engines[0].StartLoopAsync(initialDelayMs);
+	public async Task<bool> InitializeSequentialAsync() => _engines.Count == 1 && await _engines[0].InitializeCurrentAccountAsync();
+	public void ConfigureAccounts(IReadOnlyList<int> accounts) { foreach (BotEngine engine in _engines) engine.ConfigureAccounts(accounts); }
 
 	public void KeepBrowserOnFinish()
 	{

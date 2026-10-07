@@ -153,6 +153,15 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 
 	private static readonly JsonEncodedText PropName_StickerY = JsonEncodedText.Encode("StickerY");
 
+	private static readonly JsonEncodedText PropName_AccountMenuX = JsonEncodedText.Encode("AccountMenuX");
+	private static readonly JsonEncodedText PropName_AccountMenuY = JsonEncodedText.Encode("AccountMenuY");
+	private static readonly JsonEncodedText PropName_Account1X = JsonEncodedText.Encode("Account1X");
+	private static readonly JsonEncodedText PropName_Account1Y = JsonEncodedText.Encode("Account1Y");
+	private static readonly JsonEncodedText PropName_Account2X = JsonEncodedText.Encode("Account2X");
+	private static readonly JsonEncodedText PropName_Account2Y = JsonEncodedText.Encode("Account2Y");
+	private static readonly JsonEncodedText PropName_Account3X = JsonEncodedText.Encode("Account3X");
+	private static readonly JsonEncodedText PropName_Account3Y = JsonEncodedText.Encode("Account3Y");
+
 	public JsonTypeInfo<bool> Boolean => _Boolean ?? (_Boolean = (JsonTypeInfo<bool>)base.Options.GetTypeInfo(typeof(bool)));
 
 	public JsonTypeInfo<Dictionary<string, object>> DictionaryStringObject => _DictionaryStringObject ?? (_DictionaryStringObject = (JsonTypeInfo<Dictionary<string, object>>)base.Options.GetTypeInfo(typeof(Dictionary<string, object>)));
@@ -1716,7 +1725,7 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 
 	private static JsonPropertyInfo[] SavedPositionsPropInit(JsonSerializerOptions options)
 	{
-		JsonPropertyInfo[] array = new JsonPropertyInfo[8];
+		JsonPropertyInfo[] array = new JsonPropertyInfo[16];
 		JsonPropertyInfoValues<int> info0 = new JsonPropertyInfoValues<int>
 		{
 			IsProperty = true,
@@ -1877,7 +1886,36 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 			JsonPropertyName = "StickerY"
 		};
 		array[7] = JsonMetadataServices.CreatePropertyInfo(options, info7);
+		array[8] = CreateSavedPositionsIntProperty(options, "AccountMenuX", (obj, value) => ((SavedPositions)obj).AccountMenuX = value, obj => ((SavedPositions)obj).AccountMenuX);
+		array[9] = CreateSavedPositionsIntProperty(options, "AccountMenuY", (obj, value) => ((SavedPositions)obj).AccountMenuY = value, obj => ((SavedPositions)obj).AccountMenuY);
+		array[10] = CreateSavedPositionsIntProperty(options, "Account1X", (obj, value) => ((SavedPositions)obj).Account1X = value, obj => ((SavedPositions)obj).Account1X);
+		array[11] = CreateSavedPositionsIntProperty(options, "Account1Y", (obj, value) => ((SavedPositions)obj).Account1Y = value, obj => ((SavedPositions)obj).Account1Y);
+		array[12] = CreateSavedPositionsIntProperty(options, "Account2X", (obj, value) => ((SavedPositions)obj).Account2X = value, obj => ((SavedPositions)obj).Account2X);
+		array[13] = CreateSavedPositionsIntProperty(options, "Account2Y", (obj, value) => ((SavedPositions)obj).Account2Y = value, obj => ((SavedPositions)obj).Account2Y);
+		array[14] = CreateSavedPositionsIntProperty(options, "Account3X", (obj, value) => ((SavedPositions)obj).Account3X = value, obj => ((SavedPositions)obj).Account3X);
+		array[15] = CreateSavedPositionsIntProperty(options, "Account3Y", (obj, value) => ((SavedPositions)obj).Account3Y = value, obj => ((SavedPositions)obj).Account3Y);
 		return array;
+	}
+
+	private static JsonPropertyInfo CreateSavedPositionsIntProperty(JsonSerializerOptions options, string name, Action<object, int> setter, Func<object, int> getter)
+	{
+		var property = new JsonPropertyInfoValues<int>
+		{
+			IsProperty = true,
+			IsPublic = true,
+			IsVirtual = false,
+			DeclaringType = typeof(SavedPositions),
+			Converter = null,
+			Getter = getter,
+			Setter = setter,
+			IgnoreCondition = null,
+			HasJsonInclude = false,
+			IsExtensionData = false,
+			NumberHandling = null,
+			PropertyName = name,
+			JsonPropertyName = name
+		};
+		return JsonMetadataServices.CreatePropertyInfo(options, property);
 	}
 
 	private void SavedPositionsSerializeHandler(Utf8JsonWriter writer, SavedPositions? value)
@@ -1896,6 +1934,14 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 		writer.WriteNumber(PropName_StickerTabY, value.StickerTabY);
 		writer.WriteNumber(PropName_StickerX, value.StickerX);
 		writer.WriteNumber(PropName_StickerY, value.StickerY);
+		writer.WriteNumber(PropName_AccountMenuX, value.AccountMenuX);
+		writer.WriteNumber(PropName_AccountMenuY, value.AccountMenuY);
+		writer.WriteNumber(PropName_Account1X, value.Account1X);
+		writer.WriteNumber(PropName_Account1Y, value.Account1Y);
+		writer.WriteNumber(PropName_Account2X, value.Account2X);
+		writer.WriteNumber(PropName_Account2Y, value.Account2Y);
+		writer.WriteNumber(PropName_Account3X, value.Account3X);
+		writer.WriteNumber(PropName_Account3Y, value.Account3Y);
 		writer.WriteEndObject();
 	}
 

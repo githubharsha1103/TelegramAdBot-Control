@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using TelegramAdBot.Helpers;
@@ -24,6 +26,13 @@ public class BotEngine
 
 	private volatile bool _finished;
 	private bool _keepBrowserOnFinish;
+	private IReadOnlyList<int> _selectedAccounts = new[] { 1 };
+	private int _selectedAccountIndex;
+	private int _currentAccount = 1;
+	private volatile bool _accountSwitching;
+	private volatile bool _initializing;
+	private bool _accountInitializedAtBoundary;
+	private bool _initializedForNextLoop;
 
 	private int _totalCycles;
 
@@ -54,28 +63,31 @@ public class BotEngine
 	public int CyclesOnCurrentBot => _cyclesOnCurrentBot;
 
 	public int CompletedCycles => _completedCycles;
+	public int CurrentAccount => _currentAccount;
+	public int SelectedAccountIndex => _selectedAccountIndex;
+	public int SelectedAccountCount => _selectedAccounts.Count;
+	public bool IsAccountSwitching => _accountSwitching;
+	public bool IsInitializing => _initializing;
+	public string AccountState => _accountSwitching ? $"🔄 Switching to Account {_selectedAccounts.ElementAtOrDefault(_selectedAccountIndex + 1)}..." : _initializing ? $"⚙️ Initializing Account {_currentAccount}..." : _running ? $"🚀 Account {_currentAccount} promotion running..." : IsFinished ? "All selected accounts complete" : "";
 
 	public string CurrentBotUsername => _currentBotUsername;
-	public async Task<bool> SwitchAccountAsync(int accountNumber)
-	{
-		if (_controller == null || accountNumber < 1 || accountNumber > 3) return false;
-		int x = accountNumber == 1 ? _config.Account1X : accountNumber == 2 ? _config.Account2X : _config.Account3X;
-		int y = accountNumber == 1 ? _config.Account1Y : accountNumber == 2 ? _config.Account2Y : _config.Account3Y;
-		Logger.Info($"Switching to Telegram account {accountNumber}...", _instanceId);
-		if (!await _controller.ClickAsync(_config.AccountMenuX, _config.AccountMenuY)) return false;
-		await Task.Delay(700);
-		if (!await _controller.ClickAsync(x, y)) return false;
-		await Task.Delay(2500);
-		return IsBrowserAlive;
-	}
+	public void ConfigureAccounts(IReadOnlyList<int> accounts) => _selectedAccounts = accounts;
+	public void SetSelectedAccountIndex(int index) { _selectedAccountIndex = index; if (index >= 0 && index < _selectedAccounts.Count) _currentAccount = _selectedAccounts[index]; }
+	public void MarkAccountInitializedAtBoundary() { _accountInitializedAtBoundary = true; _initializedForNextLoop = false; }
 
 	public void KeepBrowserOnFinish() => _keepBrowserOnFinish = true;
+	public async Task<bool> SwitchAccountAsync(int accountNumber)
+	{
+		if (_controller == null) return false;
+		return await _controller.SwitchAccountAsync(accountNumber);
+	}
 
 	public void ResetForNextAccount()
 	{
 		_cyclesOnCurrentBot = 0;
-		_currentBotIndex = 0;
-		_currentBotUsername = _config.BotList.Count > 0 ? _config.BotList[0] : "";
+			_currentBotIndex = 0;
+			_currentBotUsername = _config.BotList.Count > 0 ? _config.BotList[0] : "";
+			_promoIndex = _instanceId - 1;
 		_finished = false;
 		_running = false;
 	}
@@ -118,13 +130,12 @@ public class BotEngine
 		return true;
 	}
 
-	public async Task NavigateToFirstBotAsync()
+	public async Task<bool> NavigateToFirstBotAsync()
 	{
-		if (_controller != null)
-		{
-			await _controller.NavigateToBotChatAsync(_currentBotUsername);
-			Logger.Success($"Ready on @{_currentBotUsername} (1/{_config.BotList.Count})", _instanceId);
-		}
+		if (_controller == null) return false;
+		bool success = await _controller.TryNavigateToBotChatAsync(_currentBotUsername);
+		if (success) Logger.Success($"Ready on @{_currentBotUsername} (1/{_config.BotList.Count})", _instanceId);
+		return success;
 	}
 
 	public async Task<bool> PrepareAsync()
@@ -133,8 +144,48 @@ public class BotEngine
 		{
 			return false;
 		}
-		await NavigateToFirstBotAsync();
-		return true;
+		return await InitializeCurrentAccountAsync();
+	}
+
+	public async Task<bool> PrepareFirstAccountAsync(int accountNumber)
+	{
+		_currentAccount = 1;
+		if (accountNumber != 1)
+		{
+			_accountSwitching = true;
+			try
+			{
+				if (_controller == null || !await _controller.SwitchAccountAsync(accountNumber)) return false;
+			}
+			finally { _accountSwitching = false; }
+		}
+		_currentAccount = accountNumber;
+		ResetForNextAccount();
+		return await InitializeCurrentAccountAsync();
+	}
+
+	public async Task<bool> InitializeCurrentAccountAsync()
+	{
+		_initializing = true;
+		try
+		{
+			if (_controller == null || !await _controller.WaitForTelegramReadyAsync())
+				throw new InvalidOperationException("Telegram page was not ready.");
+			Logger.Info($"[PromotionInit] Starting fresh initialization for Account {_currentAccount}.", _instanceId);
+			Logger.Info("[PromotionInit] Searching for bot...", _instanceId);
+			if (!await NavigateToFirstBotAsync()) throw new InvalidOperationException($"Bot @{_currentBotUsername} could not be opened.");
+			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
+			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
+			_initializedForNextLoop = true;
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Logger.Error($"[PromotionInit] Account {_currentAccount} initialization failed: {ex.Message}", _instanceId);
+			_finished = true;
+			return false;
+		}
+		finally { _initializing = false; }
 	}
 
 	public Task<bool> StartLoopAsync(int initialDelayMs = 0)
@@ -171,12 +222,10 @@ public class BotEngine
 
 	public void Pause()
 	{
-		if (_running)
-		{
-			_paused = true;
-			Logger.Warning("PAUSED.", _instanceId);
-		}
+		if (IsBrowserAlive) { _paused = true; Logger.Warning("PAUSED.", _instanceId); }
 	}
+
+	public void ResumePause() => _paused = false;
 
 	public async Task FullStopAsync()
 	{
@@ -197,8 +246,9 @@ public class BotEngine
 		Logger.Warning("STOPPED.", _instanceId);
 	}
 
-	private async Task PrepareBotForCyclingAsync(CancellationToken ct)
+	private async Task<bool> PrepareBotForCyclingAsync(CancellationToken ct)
 	{
+		if (_controller == null) return false;
 		Logger.Step($"Preparing chat: waiting {_config.WaitAfterNavigate}ms...", _instanceId);
 		try
 		{
@@ -206,29 +256,30 @@ public class BotEngine
 		}
 		catch
 		{
-			return;
+			return false;
 		}
 		Logger.Step("auto-click EMOJI button", _instanceId);
-		await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY);
+		if (!await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY)) return false;
 		try
 		{
 			await Task.Delay(_config.WaitAfterEmojiButton, ct);
 		}
 		catch
 		{
-			return;
+			return false;
 		}
 		Logger.Step("auto-click STICKER tab", _instanceId);
-		await _controller.ClickAsync(_config.StickerTabX, _config.StickerTabY);
+		if (!await _controller.ClickAsync(_config.StickerTabX, _config.StickerTabY)) return false;
 		try
 		{
 			await Task.Delay(_config.WaitAfterStickerTab, ct);
 		}
 		catch
 		{
-			return;
+			return false;
 		}
 		Logger.Success("Chat ready for cycling.", _instanceId);
+		return true;
 	}
 
 	private async Task RunLoopAsync(CancellationToken ct, int initialDelayMs)
@@ -245,7 +296,8 @@ public class BotEngine
 				return;
 			}
 		}
-		await PrepareBotForCyclingAsync(ct);
+		if (_initializedForNextLoop) _initializedForNextLoop = false;
+		else if (!await InitializeCurrentAccountAsync()) return;
 		if (ct.IsCancellationRequested)
 		{
 			return;
@@ -270,7 +322,8 @@ public class BotEngine
 				}
 				if (await SwitchToNextBotAsync(ct))
 				{
-					await PrepareBotForCyclingAsync(ct);
+					if (!_accountInitializedAtBoundary && !await PrepareBotForCyclingAsync(ct)) { _finished = true; _running = false; break; }
+					_accountInitializedAtBoundary = false;
 					if (!ct.IsCancellationRequested)
 					{
 						firstCycle = true;
@@ -362,14 +415,8 @@ public class BotEngine
 					_running = false;
 					_finished = true;
 					bool continueWithNextAccount = false;
-					foreach (Func<int, Task<bool>> handler in OnAccountWorkFinished.GetInvocationList())
-						continueWithNextAccount |= await handler(_instanceId);
-					if (continueWithNextAccount)
-					{
-						_finished = false;
-						await PrepareBotForCyclingAsync(ct);
-						return !ct.IsCancellationRequested;
-					}
+					foreach (Func<int, Task<bool>> handler in OnAccountWorkFinished.GetInvocationList()) continueWithNextAccount |= await handler(_instanceId);
+					if (continueWithNextAccount) { _running = true; return !ct.IsCancellationRequested; }
 					return false;
 				}
 				Logger.Warning($"Finished all {_config.BotList.Count} bots!", _instanceId);
@@ -392,7 +439,7 @@ public class BotEngine
 		{
 			return false;
 		}
-		await _controller.NavigateToBotChatAsync(_currentBotUsername);
+		if (!await _controller.TryNavigateToBotChatAsync(_currentBotUsername)) return false;
 		Logger.Info($"Waiting {_config.BotSwitchDelayMs}ms for chat to load...", _instanceId);
 		try
 		{

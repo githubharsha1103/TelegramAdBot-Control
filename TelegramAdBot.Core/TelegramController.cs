@@ -222,12 +222,17 @@ public class TelegramController : IAsyncDisposable
 
 	public async Task NavigateToBotChatAsync(string botUsername)
 	{
+		await TryNavigateToBotChatAsync(botUsername);
+	}
+
+	public async Task<bool> TryNavigateToBotChatAsync(string botUsername)
+	{
 		_ = 14;
 		try
 		{
 			if (string.IsNullOrWhiteSpace(botUsername) || _page == null || _page.IsClosed)
 			{
-				return;
+				return false;
 			}
 			string clean = botUsername.TrimStart('@');
 			Logger.Step("Opening chat: @" + clean, _instanceId);
@@ -294,12 +299,104 @@ public class TelegramController : IAsyncDisposable
 			await Task.Delay(500);
 			await _page.Keyboard.PressAsync("Enter");
 			await Task.Delay(2000);
+			await _page.WaitForTimeoutAsync(500);
+			bool opened = await _page.GetByText(clean, new PageGetByTextOptions { Exact = false }).First.IsVisibleAsync(new LocatorIsVisibleOptions { Timeout = 3000 });
+			if (!opened) throw new InvalidOperationException("Selected bot/chat did not become visible after search.");
 			Logger.Success("Opened @" + clean, _instanceId);
+			return true;
 		}
 		catch (Exception ex2)
 		{
 			Logger.Warning("Navigation failed: " + ex2.Message, _instanceId);
+			return false;
 		}
+	}
+
+	public async Task<bool> WaitForTelegramReadyAsync(int timeoutMs = 15000)
+	{
+		try
+		{
+			if (_page == null || _page.IsClosed) return false;
+			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = timeoutMs });
+			return true;
+		}
+		catch { return false; }
+	}
+
+	public async Task<bool> SwitchAccountAsync(int accountNumber)
+	{
+		int x = accountNumber == 1 ? _config.Account1X : accountNumber == 2 ? _config.Account2X : _config.Account3X;
+		int y = accountNumber == 1 ? _config.Account1Y : accountNumber == 2 ? _config.Account2Y : _config.Account3Y;
+		try
+		{
+			if (_page == null || _page.IsClosed || accountNumber < 1 || accountNumber > 3) return false;
+			Logger.Info($"[AccountSwitch] Opening menu for Account {accountNumber}.", _instanceId);
+			var menu = _page.Locator(".popup-container, .popup, .menu-container, .menu, [role='menu'], .account-select").First;
+			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
+			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
+			Logger.Info("[AccountSwitch] Menu opened.", _instanceId);
+			int activeBefore = await ReadActiveAccountMarkerAsync(menu);
+			if (activeBefore < 1) throw new InvalidOperationException("Telegram account menu did not expose a verifiable active-account marker.");
+			if (activeBefore == accountNumber)
+			{
+				await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
+				await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 5000 });
+				return true;
+			}
+			await _page.Mouse.ClickAsync(x, y);
+			Logger.Info($"[AccountSwitch] Account {accountNumber} selected; waiting for Telegram readiness.", _instanceId);
+			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 5000 });
+			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+			await _page.Locator("input[type='text']").First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
+			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
+			int activeAfter = await ReadActiveAccountMarkerAsync(menu);
+			if (activeAfter != accountNumber) throw new InvalidOperationException($"Requested Account {accountNumber}, but Telegram active-account marker reports Account {activeAfter}.");
+			Logger.Info($"[AccountSwitch] Account {accountNumber} positively verified active.", _instanceId);
+			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
+			await menu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Hidden, Timeout = 5000 });
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Logger.Error($"[AccountSwitch] Account {accountNumber} switch failed: {ex.Message}", _instanceId);
+			return false;
+		}
+	}
+
+	private async Task<int> ReadActiveAccountMarkerAsync(ILocator menu)
+	{
+		return await menu.EvaluateAsync<int>(@"(element, args) => {
+			const points = [
+				{ account: 1, x: args.account1X, y: args.account1Y },
+				{ account: 2, x: args.account2X, y: args.account2Y },
+				{ account: 3, x: args.account3X, y: args.account3Y }
+			];
+			const hasActiveMarker = node => {
+				const cls = String(node.className || '').toLowerCase();
+				const ariaCurrent = String(node.getAttribute('aria-current') || '').toLowerCase();
+				const ariaSelected = String(node.getAttribute('aria-selected') || '').toLowerCase();
+				const ariaChecked = String(node.getAttribute('aria-checked') || '').toLowerCase();
+				const dataState = String(node.getAttribute('data-state') || '').toLowerCase();
+				return /(^|[-_ ])(active|current|selected)([-_ ]|$)/.test(cls) ||
+					ariaCurrent === 'true' || ariaCurrent === 'page' || ariaSelected === 'true' || ariaChecked === 'true' || dataState === 'active' ||
+					!!node.querySelector('[aria-current=''true''], [aria-selected=''true''], [aria-checked=''true''], .active, .current, .selected');
+			};
+			for (const point of points) {
+				const hit = document.elementFromPoint(point.x, point.y);
+				if (!hit || !element.contains(hit)) continue;
+				for (let node = hit; node && node !== element.parentElement; node = node.parentElement) {
+					if (node === element) break;
+					if (hasActiveMarker(node)) return point.account;
+				}
+			}
+			return 0;
+		}", new
+		{
+			account1X = _config.Account1X, account1Y = _config.Account1Y,
+			account2X = _config.Account2X, account2Y = _config.Account2Y,
+			account3X = _config.Account3X, account3Y = _config.Account3Y
+		});
 	}
 
 	public async Task<(int x, int y)?> PickPositionAsync(string label)
