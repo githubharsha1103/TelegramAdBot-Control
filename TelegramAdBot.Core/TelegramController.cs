@@ -236,7 +236,6 @@ public class TelegramController : IAsyncDisposable
 
 	public async Task<bool> TryNavigateToBotChatAsync(string botUsername)
 	{
-		_ = 14;
 		try
 		{
 			if (string.IsNullOrWhiteSpace(botUsername) || _page == null || _page.IsClosed)
@@ -244,7 +243,7 @@ public class TelegramController : IAsyncDisposable
 				return false;
 			}
 			string clean = botUsername.TrimStart('@');
-			Logger.Info($"[PromotionInit] Searching for bot: @{clean}", _instanceId);
+			Logger.Step("Opening chat: @" + clean, _instanceId);
 			try
 			{
 				if (!_page.Url.Contains("web.telegram.org"))
@@ -306,21 +305,14 @@ public class TelegramController : IAsyncDisposable
 				Delay = 50f
 			});
 			await Task.Delay(500);
-			var botResult = _page.GetByText(clean, new PageGetByTextOptions { Exact = false }).First;
-			await botResult.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
-			Logger.Info("[PromotionInit] Bot search completed.", _instanceId);
-			Logger.Info("[PromotionInit] Opening bot/chat.", _instanceId);
 			await _page.Keyboard.PressAsync("Enter");
 			await Task.Delay(2000);
-			if (!await WaitForTelegramReadyAsync()) throw new InvalidOperationException("Telegram UI did not become ready after opening the selected bot.");
-			await botResult.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
-			Logger.Info("[PromotionInit] Bot/chat loaded.", _instanceId);
 			Logger.Success("Opened @" + clean, _instanceId);
 			return true;
 		}
 		catch (Exception ex2)
 		{
-			Logger.Warning($"[PromotionInit] Bot search/open failed for @{botUsername}: {ex2.Message}", _instanceId);
+			Logger.Warning("Navigation failed: " + ex2.Message, _instanceId);
 			return false;
 		}
 	}
