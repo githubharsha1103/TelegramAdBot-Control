@@ -7,6 +7,7 @@ public sealed class PromotionRunConfiguration
 {
     public List<string> SelectedBots { get; set; } = new();
     public int InstanceCount { get; set; }
+    public List<int> SelectedInstanceIds { get; set; } = new();
     public int CyclesPerBot { get; set; }
     public int AccountCount { get; set; } = 1;
     public List<int> SelectedAccounts { get; set; } = new() { 1 };
@@ -22,6 +23,8 @@ public sealed class PromotionStatus
     public long RuntimeSeconds { get; set; }
     public List<string> SelectedBots { get; set; } = new();
     public int InstanceCount { get; set; }
+    public List<int> SelectedInstanceIds { get; set; } = new();
+    public List<int> RunningInstanceIds { get; set; } = new();
     public int CyclesPerBot { get; set; }
     public int CurrentAccount { get; set; } = 1;
     public int AccountCount { get; set; } = 1;
@@ -38,6 +41,10 @@ public sealed class PromotionStatus
 public sealed class PromotionInstanceStatus
 {
     public int InstanceId { get; set; }
+    public int CurrentAccount { get; set; } = 1;
+    public int SelectedAccountIndex { get; set; }
+    public int SelectedAccountCount { get; set; } = 1;
+    public string AccountState { get; set; } = "";
     public string Bot { get; set; } = "";
     public int CurrentCycle { get; set; }
     public int TotalCyclesForBot { get; set; }

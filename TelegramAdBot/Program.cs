@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
@@ -20,6 +21,7 @@ internal class Program
 	private static readonly TaskCompletionSource _exitSignal = new TaskCompletionSource();
 
 	private static bool _isFirstRunSetupMode = false;
+	private static List<int> _selectedInstanceIds = new();
 
 	private static async Task Main(string[] args)
 	{
@@ -73,13 +75,14 @@ internal class Program
 		_config.SetupDone = ConfigStorage.IsSetupDone();
 		bool fullyConfigured = _config.SetupDone && positionsLoaded && _config.AllSet;
 		_isFirstRunSetupMode = !fullyConfigured;
-		_manager = new InstanceManager(_config);
+		_manager = new InstanceManager(_config, _selectedInstanceIds);
 		_manager.OnAllFinished += delegate
 		{
 			_exitSignal.TrySetResult();
 		};
 		RegisterGlobalHotkeys();
 		ConsoleUI.PrintMainBanner(_config.BotList.Count, _config.InstanceCount, _config.CyclesPerBot, fullyConfigured);
+		Console.WriteLine($"Selected browser instances: [{string.Join(",", _selectedInstanceIds)}]");
 		if (!_isFirstRunSetupMode)
 		{
 			await NormalRunFlowAsync();
@@ -155,20 +158,32 @@ internal class Program
                 }
 
                 Console.WriteLine();
-                Console.WriteLine("Number of Chromium browsers:");
+                Console.WriteLine("Select browser instances (1, 2, 3; for example: 1,3):");
 
                 while (true)
                 {
                         Console.Write("> ");
                         string input = Console.ReadLine()?.Trim() ?? "";
-
-                        if (int.TryParse(input, out int instances) && instances > 0)
+                        var selected = new List<int>();
+                        bool valid = true;
+                        foreach (string part in input.Split(',', StringSplitOptions.RemoveEmptyEntries))
                         {
-                                _config.InstanceCount = instances;
+                                if (!int.TryParse(part.Trim(), out int instanceId) || instanceId < 1 || instanceId > 3)
+                                {
+                                        valid = false;
+                                        break;
+                                }
+                                if (!selected.Contains(instanceId)) selected.Add(instanceId);
+                        }
+
+                        if (valid && selected.Count > 0)
+                        {
+                                _selectedInstanceIds = selected.OrderBy(id => id).ToList();
+                                _config.InstanceCount = _selectedInstanceIds.Count;
                                 break;
                         }
 
-                        Console.WriteLine("Please enter a number greater than 0.");
+                        Console.WriteLine("Select at least one instance using IDs 1, 2, and/or 3.");
                 }
 
                 Console.WriteLine();
@@ -194,7 +209,7 @@ internal class Program
                 Console.WriteLine("                 SELECTED CONFIGURATION");
                 Console.WriteLine("============================================================");
                 Console.WriteLine($"Bots selected : {_config.BotList.Count}");
-                Console.WriteLine($"Chromium      : {_config.InstanceCount}");
+                Console.WriteLine($"Instances     : [{string.Join(",", _selectedInstanceIds)}]");
                 Console.WriteLine($"Cycles/bot    : {_config.CyclesPerBot}");
                 Console.WriteLine("============================================================");
                 Console.ResetColor();
@@ -348,7 +363,7 @@ internal class Program
                                                 Console.WriteLine();
                                                 Console.WriteLine("STATUS");
                                                 Console.WriteLine($"Bots       : {_config.BotList.Count}");
-                                                Console.WriteLine($"Instances  : {_config.InstanceCount}");
+								Console.WriteLine($"Instances  : [{string.Join(",", _selectedInstanceIds)}]");
                                                 Console.WriteLine($"Cycles/bot : {_config.CyclesPerBot}");
                                                 Console.WriteLine();
                                                 break;

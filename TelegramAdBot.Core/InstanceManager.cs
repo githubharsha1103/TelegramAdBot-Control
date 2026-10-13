@@ -13,6 +13,7 @@ public class InstanceManager
 	private readonly BotConfig _config;
 
 	private readonly List<BotEngine> _engines = new List<BotEngine>();
+	private readonly bool _cloneProfilesOnOpen;
 
 	private int _finishedCount;
 
@@ -35,12 +36,26 @@ public class InstanceManager
 	public InstanceManager(BotConfig config)
 	{
 		_config = config;
+		_cloneProfilesOnOpen = true;
 		for (int i = 1; i <= config.InstanceCount; i++)
 		{
-			BotEngine engine = new BotEngine(config, i);
-			engine.OnFinished += HandleEngineFinished;
-			_engines.Add(engine);
+			AddEngine(i);
 		}
+	}
+
+	public InstanceManager(BotConfig config, IReadOnlyList<int> selectedInstanceIds)
+	{
+		_config = config;
+		if (selectedInstanceIds == null || selectedInstanceIds.Count == 0 || selectedInstanceIds.Any(id => id < 1 || id > 3))
+			throw new ArgumentException("Select one or more valid instance IDs from 1 to 3.", nameof(selectedInstanceIds));
+		foreach (int instanceId in selectedInstanceIds.Distinct().OrderBy(id => id)) AddEngine(instanceId);
+	}
+
+	private void AddEngine(int instanceId)
+	{
+		BotEngine engine = new BotEngine(_config, instanceId);
+		engine.OnFinished += HandleEngineFinished;
+		_engines.Add(engine);
 	}
 
 	private void HandleEngineFinished(int instanceId)
@@ -66,7 +81,7 @@ public class InstanceManager
 			Logger.Error("Bot list empty.");
 			return;
 		}
-		TelegramController.CloneSessionIfNeeded(_config.InstanceCount);
+		if (_cloneProfilesOnOpen) TelegramController.CloneSessionIfNeeded(_config.InstanceCount);
 		Logger.Info($"PHASE 1: Launching {_config.InstanceCount} browsers");
 		for (int i = 0; i < _engines.Count; i++)
 		{
@@ -100,17 +115,17 @@ public class InstanceManager
 			Logger.Error("Bot list empty.");
 			return;
 		}
-		Logger.Info("Opening ONLY instance 1 for first-time setup -> @" + _config.BotList[0]);
 		BotEngine first = _engines[0];
+		Logger.Info($"Opening ONLY selected instance {first.InstanceId} for first-time setup -> @{_config.BotList[0]}");
 		if (!first.IsBrowserAlive)
 		{
 			if (!(await first.PrepareAsync()))
 			{
-				Logger.Error("Instance 1 failed.", 1);
+				Logger.Error($"Instance {first.InstanceId} failed.", first.InstanceId);
 			}
 			else
 			{
-				Logger.Success("Instance 1 ready. Pick your positions now.");
+				Logger.Success($"Instance {first.InstanceId} ready. Pick your positions now.");
 			}
 		}
 	}
@@ -159,16 +174,57 @@ public class InstanceManager
 		if (!await _engines[0].PrepareBrowserAsync()) throw new InvalidOperationException("Chromium browser could not be prepared.");
 	}
 
+	public async Task<IReadOnlyList<int>> OpenSelectedBrowsersAsync()
+	{
+		var failed = new List<int>();
+		for (int i = 0; i < _engines.Count; i++)
+		{
+			BotEngine engine = _engines[i];
+			Logger.Info($"[Instance] Preparing selected Instance {engine.InstanceId}.", engine.InstanceId);
+			if (!await engine.PrepareBrowserAsync()) failed.Add(engine.InstanceId);
+			if (i < _engines.Count - 1) await Task.Delay(2000);
+		}
+		return failed;
+	}
+
+	public async Task<IReadOnlyList<int>> StartSelectedAsync()
+	{
+		if (!_config.AllSet) return _engines.Select(engine => engine.InstanceId).ToList();
+		var unavailable = _engines.Where(engine => !engine.IsBrowserAlive || engine.IsFinished).Select(engine => engine.InstanceId).ToList();
+		if (unavailable.Count > 0) return unavailable;
+		var tasks = new List<Task<(int InstanceId, bool Started)>>();
+		int delayStep = 0;
+		foreach (BotEngine engine in _engines)
+		{
+			int delay = delayStep++ * _config.StaggerDelayMs;
+			tasks.Add(StartEngineAsync(engine, delay));
+		}
+		var results = await Task.WhenAll(tasks);
+		return results.Where(result => !result.Started).Select(result => result.InstanceId).ToList();
+	}
+
+	private static async Task<(int InstanceId, bool Started)> StartEngineAsync(BotEngine engine, int delay)
+	{
+		return (engine.InstanceId, await engine.StartLoopAsync(delay));
+	}
+
 	public async Task<bool> SwitchAccountAsync(int accountNumber)
 	{
 		if (_engines.Count != 1 || !_engines[0].IsBrowserAlive) return false;
 		return await _engines[0].SwitchAccountAsync(accountNumber);
 	}
 
-	public bool IsPaused => _engines.Count == 1 && _engines[0].IsPaused;
-	public void ResumeSequential() { if (_engines.Count == 1) _engines[0].ResumePause(); }
+	public async Task<bool> SwitchAccountAsync(int instanceId, int accountNumber)
+	{
+		BotEngine? engine = GetInstance(instanceId);
+		return engine != null && engine.IsBrowserAlive && await engine.SwitchAccountAsync(accountNumber);
+	}
+
+	public bool IsPaused => _engines.Any(engine => engine.IsPaused);
+	public void ResumeSequential() { foreach (BotEngine engine in _engines) engine.ResumePause(); }
 	public async Task<bool> StartSequentialAsync(int initialDelayMs = 0) => _engines.Count == 1 && await _engines[0].StartLoopAsync(initialDelayMs);
 	public async Task<bool> InitializeSequentialAsync() => _engines.Count == 1 && await _engines[0].InitializeCurrentAccountAsync();
+	public async Task<bool> InitializeEngineAsync(int instanceId) => GetInstance(instanceId) is BotEngine engine && await engine.InitializeCurrentAccountAsync();
 	public void ConfigureAccounts(IReadOnlyList<int> accounts) { foreach (BotEngine engine in _engines) engine.ConfigureAccounts(accounts); }
 
 	public void SetRunForNextAccount()
@@ -176,9 +232,11 @@ public class InstanceManager
 		if (_engines.Count == 1) _engines[0].ResetForNextAccount();
 	}
 
+	public void SetRunForNextAccount(int instanceId) => GetInstance(instanceId)?.ResetForNextAccount();
+
 	public void SetAccountCompletionHandler(Func<int, Task<bool>> handler)
 	{
-		if (_engines.Count == 1) _engines[0].OnAccountWorkFinished += handler;
+		foreach (BotEngine engine in _engines) engine.OnAccountWorkFinished += handler;
 	}
 
 	private void PrintMissingPositions()

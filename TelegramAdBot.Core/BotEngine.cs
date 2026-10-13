@@ -79,7 +79,9 @@ public class BotEngine
 	public async Task<bool> SwitchAccountAsync(int accountNumber)
 	{
 		if (_controller == null) return false;
-		return await _controller.SwitchAccountAsync(accountNumber);
+		_accountSwitching = true;
+		try { return await _controller.SwitchAccountAsync(accountNumber); }
+		finally { _accountSwitching = false; }
 	}
 
 	public void ResetForNextAccount()
