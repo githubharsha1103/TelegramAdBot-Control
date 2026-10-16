@@ -36,6 +36,8 @@ public sealed class PromotionController
     public bool TryAddBot(string username, out string normalized, out string error) => _botConfig.TryAdd(username, out normalized, out error);
     public bool RemoveBot(string username) => _botConfig.Remove(username);
     public int ManualInstanceLimit => _manualInstances.MaximumInstanceCount;
+    public IReadOnlyList<int> GetRegisteredManualInstanceIds() => _manualInstances.GetRegisteredInstanceIds();
+    public bool CanCreateManualInstance => _manualInstances.CanCreateInstance;
     public bool CanManageInstance(int instanceId) => _manualInstances.CanManage(instanceId) && !IsInstanceInActivePromotion(instanceId);
     public bool IsManualInstanceOpen(int instanceId) => _manualInstances.IsOpen(instanceId);
     public IReadOnlyList<int> GetOpenManualInstanceIds() => _manualInstances.OpenInstanceIds;
@@ -48,6 +50,16 @@ public sealed class PromotionController
             if (IsInstanceInActivePromotion(instanceId))
                 return new ManualInstanceResult(false, false, $"Instance {instanceId} is in use by a promotion. Wait for it to finish or stop the promotion before opening its profile manually.");
             return await _manualInstances.OpenAsync(instanceId, cancellationToken);
+        }
+        finally { _commandLock.Release(); }
+    }
+
+    public async Task<ManualInstanceResult> CreateManualInstanceAsync(CancellationToken cancellationToken = default)
+    {
+        await _commandLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await _manualInstances.CreateAndOpenNextAsync(cancellationToken);
         }
         finally { _commandLock.Release(); }
     }

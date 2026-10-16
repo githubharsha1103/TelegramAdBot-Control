@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TelegramAdBot.Helpers;
@@ -19,15 +20,82 @@ public sealed class ManualInstanceManager
 	private readonly BotConfig _config;
 	private readonly ConcurrentDictionary<int, Process> _processes = new();
 	private readonly ConcurrentDictionary<int, SemaphoreSlim> _instanceLocks = new();
+	private readonly SemaphoreSlim _registryLock = new(1, 1);
 
 	public ManualInstanceManager(BotConfig config) => _config = config;
 
 	public bool CanManage(int instanceId)
 	{
-		return instanceId >= 1 && instanceId <= MaximumInstanceCount &&
+		return GetRegisteredInstanceIds().Contains(instanceId) && IsRuntimeAvailable() &&
+			Directory.Exists(AppDataPaths.ProfilePath(instanceId));
+	}
+
+	private bool IsRuntimeAvailable()
+	{
+		return
 			(!OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY"))) &&
-			Directory.Exists(AppDataPaths.ProfilePath(instanceId)) &&
 			!string.IsNullOrWhiteSpace(PlaywrightHelper.FindChromiumPath());
+	}
+
+	public IReadOnlyList<int> GetRegisteredInstanceIds()
+	{
+		var ids = new HashSet<int>();
+		try
+		{
+			if (File.Exists(AppDataPaths.ManualInstancesFile))
+			{
+				int[]? saved = JsonSerializer.Deserialize<int[]>(File.ReadAllText(AppDataPaths.ManualInstancesFile));
+				if (saved != null) foreach (int id in saved) if (id >= 1 && id <= MaximumInstanceCount) ids.Add(id);
+			}
+		}
+		catch (Exception ex) { Logger.Warning("Could not read manual instance registry: " + ex.Message); }
+		// Adopt existing profiles so installations predating the registry keep their instances.
+		for (int id = 1; id <= MaximumInstanceCount; id++)
+			if (Directory.Exists(AppDataPaths.ProfilePath(id))) ids.Add(id);
+		return ids.OrderBy(id => id).ToList();
+	}
+
+	public bool CanCreateInstance => FindNextAvailableId() != null;
+
+	public async Task<ManualInstanceResult> CreateAndOpenNextAsync(CancellationToken cancellationToken = default)
+	{
+		int instanceId;
+		await _registryLock.WaitAsync(cancellationToken);
+		try
+		{
+			if (!IsRuntimeAvailable())
+				return new ManualInstanceResult(false, false, OperatingSystem.IsLinux() && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY"))
+					? "DISPLAY is not set. Start the VNC desktop and retry."
+					: "Chromium executable was not found.");
+			instanceId = FindNextAvailableId() ?? 0;
+			if (instanceId == 0)
+				return new ManualInstanceResult(false, false, $"The configured manual instance limit of {MaximumInstanceCount} has been reached.");
+			string profilePath = AppDataPaths.ProfilePath(instanceId);
+			if (Directory.Exists(profilePath))
+				return new ManualInstanceResult(false, false, $"Instance {instanceId} already has a profile and was registered as an existing instance.");
+			Directory.CreateDirectory(profilePath);
+			var ids = GetRegisteredInstanceIds().Append(instanceId).Distinct().OrderBy(id => id).ToArray();
+			AppDataPaths.EnsureDirectories();
+			string tempFile = AppDataPaths.ManualInstancesFile + ".tmp";
+			File.WriteAllText(tempFile, JsonSerializer.Serialize(ids));
+			File.Move(tempFile, AppDataPaths.ManualInstancesFile, overwrite: true);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+		catch (Exception ex) { return new ManualInstanceResult(false, false, "Could not register a new instance: " + ex.Message); }
+		finally { _registryLock.Release(); }
+
+		ManualInstanceResult opened = await OpenAsync(instanceId, cancellationToken);
+		return opened.Success
+			? new ManualInstanceResult(true, false, $"Created and opened Instance {instanceId} on the VNC desktop. Its profile will be kept after Finish.")
+			: new ManualInstanceResult(false, false, $"Instance {instanceId} was registered with its persistent profile, but Chromium did not open: {opened.Message} You can retry from the instance menu.");
+	}
+
+	private int? FindNextAvailableId()
+	{
+		HashSet<int> registered = GetRegisteredInstanceIds().ToHashSet();
+		for (int id = 1; id <= MaximumInstanceCount; id++)
+			if (!registered.Contains(id) && !Directory.Exists(AppDataPaths.ProfilePath(id))) return id;
+		return null;
 	}
 
 	public bool IsOpen(int instanceId)
@@ -65,8 +133,8 @@ public sealed class ManualInstanceManager
 				await FocusAsync(_processes[instanceId], cancellationToken);
 				return new ManualInstanceResult(true, true, $"Instance {instanceId} is already open; its existing browser was reused.");
 			}
-			if (instanceId < 1 || instanceId > MaximumInstanceCount)
-				return new ManualInstanceResult(false, false, $"Instance ID must be from 1 to {MaximumInstanceCount}.");
+			if (instanceId < 1 || instanceId > MaximumInstanceCount || !GetRegisteredInstanceIds().Contains(instanceId))
+				return new ManualInstanceResult(false, false, $"Instance {instanceId} is not registered for manual management.");
 			string profilePath = AppDataPaths.ProfilePath(instanceId);
 			if (!Directory.Exists(profilePath))
 				return new ManualInstanceResult(false, false, $"Instance {instanceId} profile is missing: {profilePath}. Create its profile through normal browser setup first.");

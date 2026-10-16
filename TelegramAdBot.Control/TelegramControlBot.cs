@@ -234,6 +234,12 @@ public sealed class TelegramControlBot : IDisposable
 
         if (data == "manage:open") { await ManageBotsAsync(chatId, ct); return; }
         if (data == "instance:refresh" || data == "instance:back") { await InstanceMenuAsync(chatId, ct); return; }
+        if (data == "instance:create")
+        {
+            ManualInstanceResult created = await _controller.CreateManualInstanceAsync(ct);
+            await InstanceMenuAsync(chatId, created.Message, ct);
+            return;
+        }
         if (data == "instance:continue") { await OpenSelectedInstancesAsync(chatId, ct); return; }
         if (data.StartsWith("instance:toggle:", StringComparison.Ordinal) && int.TryParse(data.Substring("instance:toggle:".Length), out int toggleId))
         {
@@ -608,8 +614,8 @@ public sealed class TelegramControlBot : IDisposable
     private async Task InstanceMenuAsync(long chatId, string notice, CancellationToken ct)
     {
         HashSet<int> selected = _instanceSelections.GetOrAdd(chatId, _ => new HashSet<int>());
-        string[] lines = Enumerable.Range(1, _controller.ManualInstanceLimit).Where(id =>
-            _controller.IsManualInstanceOpen(id) || _controller.IsInstanceInActivePromotion(id) || _controller.CanManageInstance(id)).Select(id =>
+        int[] registeredIds = _controller.GetRegisteredManualInstanceIds().ToArray();
+        string[] lines = registeredIds.Select(id =>
         {
             if (_controller.IsManualInstanceOpen(id)) return $"Instance {id}: open in manual mode";
             if (_controller.IsInstanceInActivePromotion(id)) return $"Instance {id}: in use by promotion";
@@ -620,7 +626,7 @@ public sealed class TelegramControlBot : IDisposable
         await EditInstanceMessageAsync(chatId, "🖥 Instance Manager\nSelect the instances to open on the VNC desktop:\n" + string.Join("\n", lines), revision =>
         {
             var rows = new List<InlineKeyboardButton[]>();
-            for (int id = 1; id <= _controller.ManualInstanceLimit; id++)
+            foreach (int id in registeredIds)
             {
                 int instanceId = id;
                 if (_controller.IsManualInstanceOpen(instanceId))
@@ -631,7 +637,13 @@ public sealed class TelegramControlBot : IDisposable
                     lock (selected) isSelected = selected.Contains(instanceId);
                     rows.Add(new[] { InlineKeyboardButton.WithCallbackData((isSelected ? "✅ " : "⬜ ") + "Instance " + instanceId, TaggedCallback("instance", revision, "toggle:" + instanceId)) });
                 }
+                else if (_controller.IsInstanceInActivePromotion(instanceId))
+                    rows.Add(new[] { InlineKeyboardButton.WithCallbackData($"🔒 Instance {instanceId} — Promotion active", TaggedCallback("instance", revision, "refresh")) });
             }
+            if (_controller.CanCreateManualInstance)
+                rows.Add(new[] { InlineKeyboardButton.WithCallbackData("➕ Create New Instance", TaggedCallback("instance", revision, "create")) });
+            else if (_controller.GetRegisteredManualInstanceIds().Count >= _controller.ManualInstanceLimit)
+                rows.Add(new[] { InlineKeyboardButton.WithCallbackData($"Maximum instances reached ({_controller.ManualInstanceLimit})", TaggedCallback("instance", revision, "refresh")) });
             rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Continue", TaggedCallback("instance", revision, "continue")), InlineKeyboardButton.WithCallbackData("Refresh", TaggedCallback("instance", revision, "refresh")), InlineKeyboardButton.WithCallbackData("Back", TaggedCallback("instance", revision, "back")) });
             return new InlineKeyboardMarkup(rows);
         }, ct);
