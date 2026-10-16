@@ -198,13 +198,11 @@ public sealed class TelegramControlBot : IDisposable
             if (action.StartsWith("bot:", StringComparison.Ordinal)) { string bot = action.Substring(4); if (!session.SelectedBots.Add(bot)) session.SelectedBots.Remove(bot); await BotPickerAsync(chatId, ct); return; }
             if (action == "all") { session.SelectedBots = session.AvailableBots.ToHashSet(); await BotPickerAsync(chatId, ct); return; }
             if (action == "clear") { session.SelectedBots.Clear(); await BotPickerAsync(chatId, ct); return; }
-            if (action == "continue") { if (session.SelectedBots.Count == 0) { await BotPickerAsync(chatId, ct); return; } session.Step = Step.InstanceCount; await InstanceCountPickerAsync(chatId, ct); return; }
-            if (action == "instance-count:custom") { session.WaitingForCustomInstanceCount = true; await EditSelectionAsync(chatId, session, $"Enter a positive instance count from 1 to {_controller.MaxSupportedInstanceCount}.", revision => BasicSelectionKeyboard(revision, "back", "cancel"), ct); return; }
-            if (action.StartsWith("instance-count:", StringComparison.Ordinal)) { if (int.TryParse(action.Substring(15), out int count) && count > 0 && count <= _controller.MaxSupportedInstanceCount) { session.InstanceCount = count; session.SelectedInstances.RemoveWhere(id => id > count); session.Step = Step.Instances; await InstancePickerAsync(chatId, ct); } return; }
-            if (action.StartsWith("instance:", StringComparison.Ordinal)) { if (int.TryParse(action.Substring(9), out int instance) && instance >= 1 && instance <= session.InstanceCount) { if (!session.SelectedInstances.Add(instance)) session.SelectedInstances.Remove(instance); await InstancePickerAsync(chatId, ct); } return; }
-            if (action == "instances:continue") { if (session.InstanceCount < 1) { await InstanceCountPickerAsync(chatId, ct); return; } if (session.SelectedInstances.Count == 0) { await InstancePickerAsync(chatId, ct, "Select at least one instance to continue."); return; } session.CurrentAccountInstance = session.SelectedInstances.Min(); foreach (int id in session.SelectedInstances) if (!session.AccountsByInstance.ContainsKey(id)) session.AccountsByInstance[id] = new HashSet<int>(); session.Step = Step.Cycles; await CyclePromptAsync(chatId, ct); return; }
+            if (action == "continue") { if (session.SelectedBots.Count == 0) { await BotPickerAsync(chatId, ct); return; } session.Step = Step.Instances; await InstancePickerAsync(chatId, ct); return; }
+            if (action.StartsWith("instance:", StringComparison.Ordinal)) { if (int.TryParse(action.Substring(9), out int instance) && instance >= 1 && instance <= _controller.MaxSupportedInstanceCount) { if (!session.SelectedInstances.Add(instance)) session.SelectedInstances.Remove(instance); await InstancePickerAsync(chatId, ct); } return; }
+            if (action == "instances:continue") { if (session.SelectedInstances.Count == 0) { await InstancePickerAsync(chatId, ct, "Select at least one instance to continue."); return; } session.InstanceCount = session.SelectedInstances.Count; session.CurrentAccountInstance = session.SelectedInstances.Min(); foreach (int id in session.SelectedInstances) if (!session.AccountsByInstance.ContainsKey(id)) session.AccountsByInstance[id] = new HashSet<int>(); session.Step = Step.Accounts; await AccountPickerAsync(chatId, ct); return; }
             if (action.StartsWith("account:", StringComparison.Ordinal)) { if (int.TryParse(action.Substring(8), out int account) && account is >= 1 and <= 3) { var accounts = session.AccountsForCurrentInstance; if (!accounts.Add(account)) accounts.Remove(account); await AccountPickerAsync(chatId, ct); } return; }
-            if (action == "accounts:continue") { if (session.AccountsForCurrentInstance.Count == 0) { await AccountPickerAsync(chatId, ct, "Select at least one account to continue."); return; } if (session.AdvanceAccountInstance()) await AccountPickerAsync(chatId, ct); else { session.Step = Step.Confirm; await ConfirmRunAsync(chatId, session, ct); } return; }
+            if (action == "accounts:continue") { if (session.AccountsForCurrentInstance.Count == 0) { await AccountPickerAsync(chatId, ct, "Select at least one account to continue."); return; } if (session.AdvanceAccountInstance()) await AccountPickerAsync(chatId, ct); else { session.Step = Step.Cycles; await CyclePromptAsync(chatId, ct); } return; }
             if (action == "back") { await BackAsync(chatId, session, ct); return; }
             if (action == "edit") { session.Step = Step.Bots; await BotPickerAsync(chatId, ct); return; }
             if (action == "cancel") { _sessions.TryRemove(chatId, out _); await EditSelectionAsync(chatId, session, "Setup cancelled.", _ => InlineKeyboardMarkup.Empty(), ct); return; }
@@ -281,14 +279,12 @@ public sealed class TelegramControlBot : IDisposable
 
     private async Task BackAsync(long chatId, Session session, CancellationToken ct)
     {
-        session.WaitingForCustomInstanceCount = false;
         switch (session.Step)
         {
-            case Step.InstanceCount: session.Step = Step.Bots; await BotPickerAsync(chatId, ct); break;
-            case Step.Instances: session.Step = Step.InstanceCount; await InstanceCountPickerAsync(chatId, ct); break;
-            case Step.Cycles: session.Step = Step.Instances; await InstancePickerAsync(chatId, ct); break;
-            case Step.Accounts: session.Step = Step.Cycles; await CyclePromptAsync(chatId, ct); break;
-            case Step.Confirm: session.Step = Step.Accounts; session.LastAccountInstance(); await AccountPickerAsync(chatId, ct); break;
+            case Step.Instances: session.Step = Step.Bots; await BotPickerAsync(chatId, ct); break;
+            case Step.Cycles: session.Step = Step.Accounts; session.LastAccountInstance(); await AccountPickerAsync(chatId, ct); break;
+            case Step.Accounts: if (session.PreviousAccountInstance()) await AccountPickerAsync(chatId, ct); else { session.Step = Step.Instances; await InstancePickerAsync(chatId, ct); } break;
+            case Step.Confirm: session.Step = Step.Cycles; await CyclePromptAsync(chatId, ct); break;
             default: await BotPickerAsync(chatId, ct); break;
         }
     }
@@ -296,20 +292,6 @@ public sealed class TelegramControlBot : IDisposable
     private async Task NumericAsync(long chatId, string text, CancellationToken ct)
     {
         if (!_sessions.TryGetValue(chatId, out var s)) return;
-        if (s.WaitingForCustomInstanceCount)
-        {
-            if (!int.TryParse(text, out int count) || count < 1 || count > _controller.MaxSupportedInstanceCount)
-            {
-                await EditSelectionAsync(chatId, s, $"⚠️ Enter a positive whole number from 1 to {_controller.MaxSupportedInstanceCount}.", revision => BasicSelectionKeyboard(revision, "back", "cancel"), ct);
-                return;
-            }
-            s.WaitingForCustomInstanceCount = false;
-            s.InstanceCount = count;
-            s.SelectedInstances.RemoveWhere(id => id > count);
-            s.Step = Step.Instances;
-            await InstancePickerAsync(chatId, ct);
-            return;
-        }
         if (s.Step != Step.Cycles) return;
         if (!int.TryParse(text, out int n) || n < 1 || n > 100000)
         {
@@ -317,8 +299,8 @@ public sealed class TelegramControlBot : IDisposable
             return;
         }
         s.Cycles = n;
-        s.Step = Step.Accounts;
-        await AccountPickerAsync(chatId, ct);
+        s.Step = Step.Confirm;
+        await ConfirmRunAsync(chatId, s, ct);
     }
 
     private async Task BotPickerAsync(long chatId, CancellationToken ct)
@@ -333,29 +315,14 @@ public sealed class TelegramControlBot : IDisposable
         }, ct);
     }
 
-    private async Task InstanceCountPickerAsync(long chatId, CancellationToken ct)
-    {
-        var s = _sessions[chatId];
-        int max = _controller.MaxSupportedInstanceCount;
-        await EditSelectionAsync(chatId, s, $"🖥 Choose Chromium instance count (1–{max})", revision =>
-        {
-            var rows = new List<InlineKeyboardButton[]>();
-            for (int i = 1; i <= max; i += 4)
-                rows.Add(Enumerable.Range(i, Math.Min(4, max - i + 1)).Select(count => InlineKeyboardButton.WithCallbackData((s.InstanceCount == count ? "✅ " : "") + count, SelectionCallback(revision, "instance-count:" + count))).ToArray());
-            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Custom", SelectionCallback(revision, "instance-count:custom")) });
-            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Back", SelectionCallback(revision, "back")), InlineKeyboardButton.WithCallbackData("Continue", SelectionCallback(revision, "instances:continue")), InlineKeyboardButton.WithCallbackData("Cancel", SelectionCallback(revision, "cancel")) });
-            return new InlineKeyboardMarkup(rows);
-        }, ct);
-    }
-
     private async Task InstancePickerAsync(long chatId, CancellationToken ct, string notice = "")
     {
         var s = _sessions[chatId];
-        string title = $"🖥 Select instances to run (up to {s.InstanceCount})";
+        string title = $"🖥 Select promotion instances (1–{_controller.MaxSupportedInstanceCount})";
         if (!string.IsNullOrEmpty(notice)) title = "⚠️ " + notice + "\n" + title;
         await EditSelectionAsync(chatId, s, title, revision =>
         {
-            var rows = Enumerable.Range(1, s.InstanceCount).Select(id => new[] { InlineKeyboardButton.WithCallbackData((s.SelectedInstances.Contains(id) ? "✅ " : "⬜ ") + "Instance " + id, SelectionCallback(revision, "instance:" + id)) }).ToList();
+            var rows = Enumerable.Range(1, _controller.MaxSupportedInstanceCount).Select(id => new[] { InlineKeyboardButton.WithCallbackData((s.SelectedInstances.Contains(id) ? "✅ " : "⬜ ") + "Instance " + id, SelectionCallback(revision, "instance:" + id)) }).ToList();
             rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Back", SelectionCallback(revision, "back")), InlineKeyboardButton.WithCallbackData("Continue", SelectionCallback(revision, "instances:continue")), InlineKeyboardButton.WithCallbackData("Cancel", SelectionCallback(revision, "cancel")) });
             return new InlineKeyboardMarkup(rows);
         }, ct);
@@ -382,7 +349,7 @@ public sealed class TelegramControlBot : IDisposable
     }
 
     private Task ConfirmRunAsync(long chatId, Session s, CancellationToken ct) => EditSelectionAsync(chatId, s,
-        $"🚀 Confirm promotion\nBots: {string.Join(", ", s.SelectedBots.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Select(bot => "@" + bot))}\nInstance count limit: {s.InstanceCount}\nInstances to run: [{string.Join(",", s.SelectedInstances.OrderBy(x => x))}]\n{string.Join("\n", s.SelectedInstances.OrderBy(x => x).Select(id => $"Instance {id} accounts: [{string.Join(",", s.AccountsByInstance[id].OrderBy(x => x))}]"))}\nCycles per bot: {s.Cycles}",
+        $"🚀 Confirm promotion\nBots: {string.Join(", ", s.SelectedBots.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Select(bot => "@" + bot))}\nInstances to run: [{string.Join(",", s.SelectedInstances.OrderBy(x => x))}]\n{string.Join("\n", s.SelectedInstances.OrderBy(x => x).Select(id => $"Instance {id} accounts: [{string.Join(",", s.AccountsByInstance[id].OrderBy(x => x))}]"))}\nCycles per bot: {s.Cycles}",
         revision => new InlineKeyboardMarkup(new[]
         {
             new[] { InlineKeyboardButton.WithCallbackData("▶ START", SelectionCallback(revision, "start")), InlineKeyboardButton.WithCallbackData("✏️ Edit bots", SelectionCallback(revision, "edit")) },
@@ -803,13 +770,12 @@ public sealed class TelegramControlBot : IDisposable
         public bool PreviousAccountInstance() { var ids = SelectedInstances.OrderBy(x => x).ToList(); int index = ids.IndexOf(CurrentAccountInstance); if (index <= 0) return false; CurrentAccountInstance = ids[index - 1]; return true; }
         public void LastAccountInstance() => CurrentAccountInstance = SelectedInstances.OrderBy(x => x).Last();
         public int InstanceCount { get; set; }
-        public bool WaitingForCustomInstanceCount { get; set; }
         public int Cycles { get; set; }
         public Step Step { get; set; }
         public int SelectionRevision { get; set; }
         public int? SelectionMessageId { get; set; }
         public int StartInProgress;
     }
-    private enum Step { Bots, InstanceCount, Instances, Cycles, Accounts, Confirm }
+    private enum Step { Bots, Instances, Cycles, Accounts, Confirm }
     private enum EditResult { Success, Missing, Failed }
 }
