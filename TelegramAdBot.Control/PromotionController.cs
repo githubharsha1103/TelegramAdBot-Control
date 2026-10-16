@@ -51,15 +51,15 @@ public sealed class PromotionController
             if (requested.Any(x => !available.Contains(x, StringComparer.OrdinalIgnoreCase))) return Fail("One or more selected bots are no longer available.");
             int maximumInstances = GetMaximumInstanceCount();
             var selectedInstances = (run.SelectedInstanceIds ?? new List<int>()).Distinct().OrderBy(x => x).ToList();
-            if (selectedInstances.Count == 0 || selectedInstances.Any(x => x < 1 || x > maximumInstances)) return Fail($"Select browser instances from 1 to {maximumInstances}.");
+            if (selectedInstances.Count == 0 || selectedInstances.Any(id => id < 1 || id > maximumInstances)) return Fail($"Select one or more instances from 1 to {maximumInstances}.");
+            if (run.InstanceCount != selectedInstances.Count) return Fail("Selected instance count does not match the selected instance IDs.");
             if (run.CyclesPerBot < 1 || run.CyclesPerBot > 100000) return Fail("Cycles per bot must be between 1 and 100000.");
-            var selectedAccounts = (run.SelectedAccounts ?? new List<int>()).Distinct().OrderBy(x => x).ToList();
             var accountsByInstance = new Dictionary<int, List<int>>();
             foreach (int instanceId in selectedInstances)
             {
-                List<int> accounts = run.AccountsByInstance != null && run.AccountsByInstance.TryGetValue(instanceId, out var configuredAccounts)
-                    ? configuredAccounts.Distinct().OrderBy(x => x).ToList()
-                    : selectedAccounts;
+                if (run.AccountsByInstance == null || !run.AccountsByInstance.TryGetValue(instanceId, out var configuredAccounts))
+                    return Fail($"Configure Telegram accounts for selected instance {instanceId}.");
+                List<int> accounts = configuredAccounts.Distinct().OrderBy(x => x).ToList();
                 if (accounts.Count == 0 || accounts.Any(x => x < 1 || x > 3)) return Fail($"Select at least one valid Telegram account for instance {instanceId}.");
                 accountsByInstance[instanceId] = accounts;
             }
@@ -97,7 +97,7 @@ public sealed class PromotionController
             if (_run == null) return Fail("Configure a promotion run first.");
             if (!_config.AllSet) return Fail("Engine setup is incomplete: click positions are not configured.");
 
-            _config.InstanceCount = _run.SelectedInstanceIds.Count;
+            _config.InstanceCount = _run.InstanceCount;
             _config.MaxSupportedInstanceCount = _run.MaxSupportedInstanceCount;
             _manager = new InstanceManager(_config, _run.SelectedInstanceIds);
             _manager.ConfigureAccounts(_run.AccountsByInstance.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<int>)pair.Value));
