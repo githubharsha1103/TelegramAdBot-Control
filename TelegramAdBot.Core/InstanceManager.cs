@@ -226,6 +226,11 @@ public class InstanceManager
 	public async Task<bool> InitializeSequentialAsync() => _engines.Count == 1 && await _engines[0].InitializeCurrentAccountAsync();
 	public async Task<bool> InitializeEngineAsync(int instanceId) => GetInstance(instanceId) is BotEngine engine && await engine.InitializeCurrentAccountAsync();
 	public void ConfigureAccounts(IReadOnlyList<int> accounts) { foreach (BotEngine engine in _engines) engine.ConfigureAccounts(accounts); }
+	public void ConfigureAccounts(IReadOnlyDictionary<int, IReadOnlyList<int>> accountsByInstance)
+	{
+		foreach (BotEngine engine in _engines)
+			if (accountsByInstance.TryGetValue(engine.InstanceId, out IReadOnlyList<int>? accounts)) engine.ConfigureAccounts(accounts);
+	}
 
 	public void SetRunForNextAccount()
 	{

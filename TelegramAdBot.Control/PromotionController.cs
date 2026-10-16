@@ -52,10 +52,19 @@ public sealed class PromotionController
             if (selectedInstances.Count == 0 || selectedInstances.Any(x => x < 1 || x > 3)) return Fail("Select at least one valid browser instance (1, 2, or 3).");
             if (run.CyclesPerBot < 1 || run.CyclesPerBot > 100000) return Fail("Cycles per bot must be between 1 and 100000.");
             var selectedAccounts = (run.SelectedAccounts ?? new List<int>()).Distinct().OrderBy(x => x).ToList();
-            if (selectedAccounts.Count == 0 || selectedAccounts.Any(x => x < 1 || x > 3)) return Fail("Select at least one valid Telegram account.");
+            var accountsByInstance = new Dictionary<int, List<int>>();
+            foreach (int instanceId in selectedInstances)
+            {
+                List<int> accounts = run.AccountsByInstance != null && run.AccountsByInstance.TryGetValue(instanceId, out var configuredAccounts)
+                    ? configuredAccounts.Distinct().OrderBy(x => x).ToList()
+                    : selectedAccounts;
+                if (accounts.Count == 0 || accounts.Any(x => x < 1 || x > 3)) return Fail($"Select at least one valid Telegram account for instance {instanceId}.");
+                accountsByInstance[instanceId] = accounts;
+            }
 
-            _run = new PromotionRunConfiguration { SelectedBots = requested, InstanceCount = selectedInstances.Count, SelectedInstanceIds = selectedInstances, CyclesPerBot = run.CyclesPerBot, SelectedAccounts = selectedAccounts, AccountCount = selectedAccounts.Count };
-            Logger.Info("[Account] Selected accounts: [" + string.Join(",", selectedAccounts) + "]");
+            var unionAccounts = accountsByInstance.Values.SelectMany(x => x).Distinct().OrderBy(x => x).ToList();
+            _run = new PromotionRunConfiguration { SelectedBots = requested, InstanceCount = selectedInstances.Count, SelectedInstanceIds = selectedInstances, CyclesPerBot = run.CyclesPerBot, SelectedAccounts = selectedInstances.Count == 1 ? accountsByInstance[selectedInstances[0]].ToList() : unionAccounts, AccountsByInstance = accountsByInstance, AccountCount = accountsByInstance.Values.Sum(x => x.Count) };
+            foreach (var assignment in accountsByInstance) Logger.Info($"[Account] Instance {assignment.Key} selected accounts: [{string.Join(",", assignment.Value)}]");
             Logger.Info("[Instance] Selected instances: [" + string.Join(",", selectedInstances) + "]");
             _config.BotList = requested;
             _config.InstanceCount = selectedInstances.Count;
@@ -87,7 +96,7 @@ public sealed class PromotionController
 
             _config.InstanceCount = _run.SelectedInstanceIds.Count;
             _manager = new InstanceManager(_config, _run.SelectedInstanceIds);
-            _manager.ConfigureAccounts(_run.SelectedAccounts);
+            _manager.ConfigureAccounts(_run.AccountsByInstance.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<int>)pair.Value));
             _manager.SetAccountCompletionHandler(AdvanceAccountAsync);
             _manager.OnAllFinished += () => Logger.Info("[CONTROL] All promotion instances completed.");
             Logger.Info("[CONTROL] START requested.");
@@ -102,10 +111,10 @@ public sealed class PromotionController
             _startedAt = DateTimeOffset.UtcNow;
             _currentAccount = 1;
             _currentSelectedAccountIndex = 0;
-            int firstAccount = _run.SelectedAccounts[0];
             foreach (var engine in _manager.Engines)
             {
                 int instanceId = engine.InstanceId;
+                int firstAccount = _run.AccountsByInstance[instanceId][0];
                 SetInstanceProgress(instanceId, 0, 1, firstAccount == 1 ? "Initializing Account 1..." : $"Switching to Account {firstAccount}...");
                 Logger.Info($"[Account] Instance {instanceId} preparing Account {firstAccount}; Telegram initially uses Account 1.");
                 engine.SetSelectedAccountIndex(0);
@@ -123,16 +132,17 @@ public sealed class PromotionController
             if (failedStartIds.Count > 0)
             {
                 string error = "Promotion engine failed to start for instances: [" + string.Join(",", failedStartIds) + "].";
-                foreach (int instanceId in failedStartIds) SetInstanceProgress(instanceId, 0, firstAccount, "Failed", error);
+                foreach (var engine in _manager.Engines.Where(engine => failedStartIds.Contains(engine.InstanceId))) SetInstanceProgress(engine.InstanceId, 0, _run.AccountsByInstance[engine.InstanceId][0], "Failed", error);
                 SetLastError(error);
                 return Fail(error);
             }
             foreach (var engine in _manager.Engines)
             {
+                int firstAccount = _run.AccountsByInstance[engine.InstanceId][0];
                 SetInstanceProgress(engine.InstanceId, 0, firstAccount, $"Account {firstAccount} promotion running...");
                 Logger.Info($"[Promotion] Instance {engine.InstanceId} starting promotion for Account {firstAccount}.");
             }
-            if (_run.SelectedInstanceIds.Count == 1) _accountState = $"Account {firstAccount} promotion running...";
+            if (_run.SelectedInstanceIds.Count == 1) _accountState = $"Account {_run.AccountsByInstance[_run.SelectedInstanceIds[0]][0]} promotion running...";
             else _accountState = "Per-instance account workflows running";
             return Ok("Promotion started.");
         }
@@ -148,11 +158,12 @@ public sealed class PromotionController
     private async Task<bool> AdvanceAccountAsync(int instanceId)
     {
         if (_run == null || _isStopping || !_instanceProgress.TryGetValue(instanceId, out var progress)) return false;
-        if (progress.SelectedAccountIndex + 1 >= _run.SelectedAccounts.Count) return false;
+        List<int> accounts = _run.AccountsByInstance[instanceId];
+        if (progress.SelectedAccountIndex + 1 >= accounts.Count) return false;
         while (_manager?.IsPaused == true && !_isStopping) await Task.Delay(200);
         if (_isStopping) return false;
         int nextIndex = progress.SelectedAccountIndex + 1;
-        int next = _run.SelectedAccounts[nextIndex];
+        int next = accounts[nextIndex];
         SetInstanceProgress(instanceId, progress.SelectedAccountIndex, progress.CurrentAccount, $"Switching to Account {next}...");
         Logger.Info($"[CONTROL] Instance {instanceId} switching Account {progress.CurrentAccount} -> Account {next}.");
         try
@@ -253,6 +264,7 @@ public sealed class PromotionController
             CurrentAccount = firstProgress?.CurrentAccount ?? _currentAccount,
             AccountCount = _run?.AccountCount ?? 1,
             SelectedAccounts = _run?.SelectedAccounts.ToList() ?? new List<int>(),
+            AccountsByInstance = _run?.AccountsByInstance.ToDictionary(pair => pair.Key, pair => pair.Value.ToList()) ?? new Dictionary<int, List<int>>(),
             CurrentSelectedAccountIndex = firstProgress?.SelectedAccountIndex ?? _currentSelectedAccountIndex,
             AccountState = selectedIds.Count > 1 ? "Account progress is shown per instance." : firstProgress?.State ?? _accountState,
             IsPaused = manager?.IsPaused == true,
@@ -269,7 +281,7 @@ public sealed class PromotionController
                 .Select(engine => engine.InstanceId).OrderBy(id => id).ToList() ?? new List<int>(),
             CyclesPerBot = _run?.CyclesPerBot ?? 0,
 			// Each existing engine instance processes the configured bot list independently.
-			TotalCycles = (_run?.SelectedBots.Count ?? 0) * (_run?.CyclesPerBot ?? 0) * (_run?.SelectedAccounts.Count ?? 0) * (_run?.SelectedInstanceIds.Count ?? 0),
+			TotalCycles = (_run?.SelectedBots.Count ?? 0) * (_run?.CyclesPerBot ?? 0) * (_run?.AccountsByInstance.Values.Sum(accounts => accounts.Count) ?? 0),
             CompletedCycles = manager?.Engines.Sum(x => x.CompletedCycles) ?? 0,
             LastError = _lastError
         };

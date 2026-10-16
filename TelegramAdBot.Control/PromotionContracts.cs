@@ -11,6 +11,7 @@ public sealed class PromotionRunConfiguration
     public int CyclesPerBot { get; set; }
     public int AccountCount { get; set; } = 1;
     public List<int> SelectedAccounts { get; set; } = new() { 1 };
+    public Dictionary<int, List<int>> AccountsByInstance { get; set; } = new();
 }
 
 public sealed class PromotionStatus
@@ -29,6 +30,7 @@ public sealed class PromotionStatus
     public int CurrentAccount { get; set; } = 1;
     public int AccountCount { get; set; } = 1;
     public List<int> SelectedAccounts { get; set; } = new();
+    public Dictionary<int, List<int>> AccountsByInstance { get; set; } = new();
     public int CurrentSelectedAccountIndex { get; set; }
     public string AccountState { get; set; } = "Idle";
     public int TotalCycles { get; set; }
