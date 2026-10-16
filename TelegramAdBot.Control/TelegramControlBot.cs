@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using TelegramAdBot.Core;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
@@ -30,6 +31,9 @@ public sealed class TelegramControlBot : IDisposable
     private readonly ConcurrentDictionary<long, int> _statusMessages = new();
     private readonly ConcurrentDictionary<long, int> _selectionMessages = new();
     private readonly ConcurrentDictionary<long, int> _managementMessages = new();
+    private readonly ConcurrentDictionary<long, int> _instanceMessages = new();
+    private readonly ConcurrentDictionary<long, string> _instanceCallbackTokens = new();
+    private readonly ConcurrentDictionary<long, HashSet<int>> _instanceSelections = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _chatLocks = new();
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _statusRefreshTokens = new();
     private readonly ConcurrentDictionary<long, string> _lastStatusRender = new();
@@ -43,6 +47,7 @@ public sealed class TelegramControlBot : IDisposable
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _selectionLocks = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _statusLocks = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _managementLocks = new();
+    private readonly ConcurrentDictionary<long, SemaphoreSlim> _instanceMessageLocks = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _messageApiLocks = new();
     private readonly ConcurrentDictionary<long, DateTimeOffset> _lastMessageOperation = new();
     private readonly ConcurrentDictionary<long, DateTimeOffset> _addBotPending = new();
@@ -143,10 +148,11 @@ public sealed class TelegramControlBot : IDisposable
         }
 
         if (text.StartsWith("/status", StringComparison.OrdinalIgnoreCase)) { await StatusAsync(chatId.Value, ct); return; }
+        if (text.Equals("/instance", StringComparison.OrdinalIgnoreCase)) { await InstanceMenuAsync(chatId.Value, ct); return; }
         if (text.StartsWith("/pause", StringComparison.OrdinalIgnoreCase)) { await ResultAsync(chatId.Value, await _controller.PauseAsync(), ct); return; }
         if (text.StartsWith("/resume", StringComparison.OrdinalIgnoreCase)) { await ResultAsync(chatId.Value, await _controller.ResumeAsync(), ct); return; }
         if (text.StartsWith("/stop", StringComparison.OrdinalIgnoreCase)) { await ConfirmStopAsync(chatId.Value, ct); return; }
-        if (text.StartsWith("/help", StringComparison.OrdinalIgnoreCase)) { await SafeSendAsync(chatId.Value, "/start \u2014 configure\n/status \u2014 current status\n/pause, /resume, /stop", null, ct); return; }
+        if (text.StartsWith("/help", StringComparison.OrdinalIgnoreCase)) { await SafeSendAsync(chatId.Value, "/start \u2014 configure\n/status \u2014 current status\n/instance \u2014 manage Chromium instances\n/pause, /resume, /stop", null, ct); return; }
         await NumericAsync(chatId.Value, text, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
@@ -218,9 +224,36 @@ public sealed class TelegramControlBot : IDisposable
                 !_managementCallbackTokens.TryGetValue(chatId, out string currentToken) || currentToken != manageToken) return;
             data = manageAction.StartsWith("remove:", StringComparison.Ordinal) ? manageAction : "manage:" + manageAction;
         }
-        else if (data.StartsWith("status:", StringComparison.Ordinal) || data.StartsWith("manage:", StringComparison.Ordinal) || data.StartsWith("remove:", StringComparison.Ordinal)) return;
+        else if (TryReadTaggedCallback(data, "instance", out string instanceToken, out string instanceAction))
+        {
+            if (!_instanceMessages.TryGetValue(chatId, out int activeInstanceId) || messageId != activeInstanceId ||
+                !_instanceCallbackTokens.TryGetValue(chatId, out string currentToken) || currentToken != instanceToken) return;
+            data = "instance:" + instanceAction;
+        }
+        else if (data.StartsWith("status:", StringComparison.Ordinal) || data.StartsWith("manage:", StringComparison.Ordinal) || data.StartsWith("remove:", StringComparison.Ordinal) || data.StartsWith("instance:", StringComparison.Ordinal)) return;
 
         if (data == "manage:open") { await ManageBotsAsync(chatId, ct); return; }
+        if (data == "instance:refresh" || data == "instance:back") { await InstanceMenuAsync(chatId, ct); return; }
+        if (data == "instance:continue") { await OpenSelectedInstancesAsync(chatId, ct); return; }
+        if (data.StartsWith("instance:toggle:", StringComparison.Ordinal) && int.TryParse(data.Substring("instance:toggle:".Length), out int toggleId))
+        {
+            HashSet<int> selected = _instanceSelections.GetOrAdd(chatId, _ => new HashSet<int>());
+            if (_controller.CanManageInstance(toggleId)) { lock (selected) { if (!selected.Add(toggleId)) selected.Remove(toggleId); } }
+            await InstanceMenuAsync(chatId, ct);
+            return;
+        }
+        if (data.StartsWith("instance:open:", StringComparison.Ordinal) && int.TryParse(data.Substring("instance:open:".Length), out int openId))
+        {
+            ManualInstanceResult result = await _controller.OpenManualInstanceAsync(openId, ct);
+            await InstanceStatusAsync(chatId, result.Message, ct);
+            return;
+        }
+        if (data.StartsWith("instance:finish:", StringComparison.Ordinal) && int.TryParse(data.Substring("instance:finish:".Length), out int finishId))
+        {
+            ManualInstanceResult result = await _controller.CloseManualInstanceAsync(finishId, ct);
+            await InstanceMenuAsync(chatId, result.Message, ct);
+            return;
+        }
         if (data == "manage:back") { _managementCallbackTokens[chatId] = Guid.NewGuid().ToString("N").Substring(0, 8); await EditManagementAsync(chatId, "Manage Bots closed.", InlineKeyboardMarkup.Empty(), ct); await StatusAsync(chatId, ct); return; }
         if (data == "manage:add") { _addBotPending[chatId] = DateTimeOffset.UtcNow.AddMinutes(2); await EditManagementAsync(chatId, "Send the Telegram username of the promotion bot.\nExample: @newbot\nSend cancel to stop.", InlineKeyboardMarkup.Empty(), ct); return; }
         if (data == "manage:list") { await ManageBotsAsync(chatId, ct); return; }
@@ -570,6 +603,93 @@ public sealed class TelegramControlBot : IDisposable
         finally { gate.Release(); }
     }
 
+    private async Task InstanceMenuAsync(long chatId, CancellationToken ct) => await InstanceMenuAsync(chatId, "", ct);
+
+    private async Task InstanceMenuAsync(long chatId, string notice, CancellationToken ct)
+    {
+        HashSet<int> selected = _instanceSelections.GetOrAdd(chatId, _ => new HashSet<int>());
+        string[] lines = Enumerable.Range(1, _controller.ManualInstanceLimit).Where(id =>
+            _controller.IsManualInstanceOpen(id) || _controller.IsInstanceInActivePromotion(id) || _controller.CanManageInstance(id)).Select(id =>
+        {
+            if (_controller.IsManualInstanceOpen(id)) return $"Instance {id}: open in manual mode";
+            if (_controller.IsInstanceInActivePromotion(id)) return $"Instance {id}: in use by promotion";
+            return $"Instance {id}: available";
+        }).ToArray();
+        if (lines.Length == 0) lines = new[] { "No instances are currently manageable. Check that Chromium and existing instance profiles are available." };
+        if (!string.IsNullOrWhiteSpace(notice)) lines = new[] { notice, "" }.Concat(lines).ToArray();
+        await EditInstanceMessageAsync(chatId, "🖥 Instance Manager\nSelect the instances to open on the VNC desktop:\n" + string.Join("\n", lines), revision =>
+        {
+            var rows = new List<InlineKeyboardButton[]>();
+            for (int id = 1; id <= _controller.ManualInstanceLimit; id++)
+            {
+                int instanceId = id;
+                if (_controller.IsManualInstanceOpen(instanceId))
+                    rows.Add(new[] { InlineKeyboardButton.WithCallbackData($"🟢 Instance {instanceId} — Open", TaggedCallback("instance", revision, "open:" + instanceId)) });
+                else if (_controller.CanManageInstance(instanceId))
+                {
+                    bool isSelected;
+                    lock (selected) isSelected = selected.Contains(instanceId);
+                    rows.Add(new[] { InlineKeyboardButton.WithCallbackData((isSelected ? "✅ " : "⬜ ") + "Instance " + instanceId, TaggedCallback("instance", revision, "toggle:" + instanceId)) });
+                }
+            }
+            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Continue", TaggedCallback("instance", revision, "continue")), InlineKeyboardButton.WithCallbackData("Refresh", TaggedCallback("instance", revision, "refresh")), InlineKeyboardButton.WithCallbackData("Back", TaggedCallback("instance", revision, "back")) });
+            return new InlineKeyboardMarkup(rows);
+        }, ct);
+    }
+
+    private async Task OpenSelectedInstancesAsync(long chatId, CancellationToken ct)
+    {
+        HashSet<int> selected = _instanceSelections.GetOrAdd(chatId, _ => new HashSet<int>());
+        int[] ids;
+        lock (selected) ids = selected.OrderBy(id => id).ToArray();
+        if (ids.Length == 0) { await InstanceMenuAsync(chatId, "Select at least one available instance first.", ct); return; }
+        var results = new List<string>();
+        foreach (int id in ids)
+        {
+            ManualInstanceResult result = await _controller.OpenManualInstanceAsync(id, ct);
+            results.Add(result.Message);
+            if (result.Success) lock (selected) selected.Remove(id);
+        }
+        await InstanceStatusAsync(chatId, string.Join("\n", results) + "\nConnect to the existing VNC desktop to manage these browser windows. Promotion actions are not started.", ct);
+    }
+
+    private async Task InstanceStatusAsync(long chatId, string notice, CancellationToken ct)
+    {
+        int[] openIds = _controller.GetOpenManualInstanceIds().ToArray();
+        string body = openIds.Length == 0
+            ? "No instances are currently open in manual mode."
+            : string.Join("\n", openIds.Select(id => $"Instance {id}: open on the VNC desktop."));
+        string text = "🖥 Manual Instance Status\n" + notice + "\n\n" + body + "\nConnect to the existing VNC desktop to manage Chromium manually. No promotion actions are running from this command.";
+        await EditInstanceMessageAsync(chatId, text, revision =>
+        {
+            var rows = openIds.Select(id => new[] { InlineKeyboardButton.WithCallbackData("Finish", TaggedCallback("instance", revision, "finish:" + id)) }).ToList();
+            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Refresh", TaggedCallback("instance", revision, "refresh")), InlineKeyboardButton.WithCallbackData("Back", TaggedCallback("instance", revision, "back")) });
+            return new InlineKeyboardMarkup(rows);
+        }, ct);
+    }
+
+    private async Task EditInstanceMessageAsync(long chatId, string text, Func<string, InlineKeyboardMarkup> keyboardFactory, CancellationToken ct)
+    {
+        SemaphoreSlim gate = _instanceMessageLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            string token = Guid.NewGuid().ToString("N").Substring(0, 8);
+            _instanceCallbackTokens[chatId] = token;
+            InlineKeyboardMarkup keyboard = keyboardFactory(token);
+            if (_instanceMessages.TryGetValue(chatId, out int messageId))
+            {
+                EditResult edit = await EditMessageSafeAsync(chatId, messageId, text, keyboard, ct, "instance-manager");
+                if (edit == EditResult.Success) return;
+                if (edit == EditResult.Failed) return;
+                _instanceMessages.TryRemove(chatId, out _);
+            }
+            Message sent = await SafeSendAsync(chatId, text, keyboard, ct, "instance-manager");
+            if (sent != null) _instanceMessages[chatId] = sent.MessageId;
+        }
+        finally { gate.Release(); }
+    }
+
     private async Task<Message> SafeSendAsync(long chatId, string text, InlineKeyboardMarkup keyboard, CancellationToken ct, string actionName = "message-send")
     {
         var gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
@@ -657,7 +777,7 @@ public sealed class TelegramControlBot : IDisposable
         return b.Append($"\n\u23F1 Runtime: {TimeSpan.FromSeconds(s.RuntimeSeconds):hh\\:mm\\:ss}\n\u26A1 Status: {(s.IsPaused ? "PAUSED" : s.IsRunning ? "RUNNING" : "STOPPED")}").ToString();
     }
     private static Task HandleErrorAsync(ITelegramBotClient _, Exception ex, HandleErrorSource __, CancellationToken ___) { Helpers.Logger.Warning("[CONTROL] Telegram error: " + ex.Message); return Task.CompletedTask; }
-    public void Dispose() { _cts.Cancel(); _cts.Dispose(); _apiHttpClient.Dispose(); }
+    public void Dispose() { _cts.Cancel(); try { _controller.CloseAllManualInstancesAsync().GetAwaiter().GetResult(); } catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Manual instance shutdown cleanup failed: " + ex.Message); } _cts.Dispose(); _apiHttpClient.Dispose(); }
 
     private sealed class Session
     {

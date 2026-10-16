@@ -19,6 +19,7 @@ public sealed class PromotionController
     private readonly ConcurrentDictionary<int, InstanceAccountProgress> _instanceProgress = new();
     private readonly object _errorLock = new();
     private InstanceManager? _manager;
+    private readonly ManualInstanceManager _manualInstances;
     private PromotionRunConfiguration? _run;
     private DateTimeOffset? _startedAt;
     private bool _isStopping;
@@ -27,13 +28,45 @@ public sealed class PromotionController
     private string _accountState = "Idle";
     private int _currentSelectedAccountIndex;
 
-    public PromotionController(BotConfig config, BotConfigManager? botConfig = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); }
+    public PromotionController(BotConfig config, BotConfigManager? botConfig = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _manualInstances = new ManualInstanceManager(config); }
 
     public IReadOnlyList<string> GetAvailableBots() => _botConfig.GetBots();
     public int MaxSupportedInstanceCount => GetMaximumInstanceCount();
     public int GetConfiguredBotCount() => _botConfig.GetBots().Count;
     public bool TryAddBot(string username, out string normalized, out string error) => _botConfig.TryAdd(username, out normalized, out error);
     public bool RemoveBot(string username) => _botConfig.Remove(username);
+    public int ManualInstanceLimit => _manualInstances.MaximumInstanceCount;
+    public bool CanManageInstance(int instanceId) => _manualInstances.CanManage(instanceId) && !IsInstanceInActivePromotion(instanceId);
+    public bool IsManualInstanceOpen(int instanceId) => _manualInstances.IsOpen(instanceId);
+    public IReadOnlyList<int> GetOpenManualInstanceIds() => _manualInstances.OpenInstanceIds;
+
+    public async Task<ManualInstanceResult> OpenManualInstanceAsync(int instanceId, CancellationToken cancellationToken = default)
+    {
+        await _commandLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (IsInstanceInActivePromotion(instanceId))
+                return new ManualInstanceResult(false, false, $"Instance {instanceId} is in use by a promotion. Wait for it to finish or stop the promotion before opening its profile manually.");
+            return await _manualInstances.OpenAsync(instanceId, cancellationToken);
+        }
+        finally { _commandLock.Release(); }
+    }
+
+    public async Task<ManualInstanceResult> CloseManualInstanceAsync(int instanceId, CancellationToken cancellationToken = default)
+    {
+        await _commandLock.WaitAsync(cancellationToken);
+        try { return await _manualInstances.CloseAsync(instanceId, cancellationToken); }
+        finally { _commandLock.Release(); }
+    }
+
+    public async Task CloseAllManualInstancesAsync()
+    {
+        await _commandLock.WaitAsync();
+        try { await _manualInstances.CloseAllAsync(); }
+        finally { _commandLock.Release(); }
+    }
+
+    public bool IsInstanceInActivePromotion(int instanceId) => _manager?.Engines.Any(engine => engine.InstanceId == instanceId && engine.IsBrowserAlive) == true;
 
     public async Task<ControlResult> ConfigureAsync(PromotionRunConfiguration run)
     {
@@ -96,6 +129,8 @@ public sealed class PromotionController
             if (_manager?.AnyRunning == true) return Fail("Promotion is already running.");
             if (_run == null) return Fail("Configure a promotion run first.");
             if (!_config.AllSet) return Fail("Engine setup is incomplete: click positions are not configured.");
+            int[] manuallyOpen = _run.SelectedInstanceIds.Where(_manualInstances.IsOpen).ToArray();
+            if (manuallyOpen.Length > 0) return Fail("Manually managed instances are open: [" + string.Join(",", manuallyOpen) + "]. Finish manual management before starting a promotion run.");
 
             _config.InstanceCount = _run.InstanceCount;
             _config.MaxSupportedInstanceCount = _run.MaxSupportedInstanceCount;
