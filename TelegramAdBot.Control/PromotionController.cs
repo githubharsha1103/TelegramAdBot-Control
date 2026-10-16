@@ -30,6 +30,7 @@ public sealed class PromotionController
     public PromotionController(BotConfig config, BotConfigManager? botConfig = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); }
 
     public IReadOnlyList<string> GetAvailableBots() => _botConfig.GetBots();
+    public int MaxSupportedInstanceCount => GetMaximumInstanceCount();
     public int GetConfiguredBotCount() => _botConfig.GetBots().Count;
     public bool TryAddBot(string username, out string normalized, out string error) => _botConfig.TryAdd(username, out normalized, out error);
     public bool RemoveBot(string username) => _botConfig.Remove(username);
@@ -48,8 +49,9 @@ public sealed class PromotionController
             var requested = run.SelectedBots.Select(x => x.Trim().TrimStart('@')).Where(x => x.Length > 0).Distinct().ToList();
             if (requested.Count == 0) return Fail("Select at least one bot.");
             if (requested.Any(x => !available.Contains(x, StringComparer.OrdinalIgnoreCase))) return Fail("One or more selected bots are no longer available.");
+            int maximumInstances = GetMaximumInstanceCount();
             var selectedInstances = (run.SelectedInstanceIds ?? new List<int>()).Distinct().OrderBy(x => x).ToList();
-            if (selectedInstances.Count == 0 || selectedInstances.Any(x => x < 1 || x > 3)) return Fail("Select at least one valid browser instance (1, 2, or 3).");
+            if (selectedInstances.Count == 0 || selectedInstances.Any(x => x < 1 || x > maximumInstances)) return Fail($"Select browser instances from 1 to {maximumInstances}.");
             if (run.CyclesPerBot < 1 || run.CyclesPerBot > 100000) return Fail("Cycles per bot must be between 1 and 100000.");
             var selectedAccounts = (run.SelectedAccounts ?? new List<int>()).Distinct().OrderBy(x => x).ToList();
             var accountsByInstance = new Dictionary<int, List<int>>();
@@ -63,11 +65,12 @@ public sealed class PromotionController
             }
 
             var unionAccounts = accountsByInstance.Values.SelectMany(x => x).Distinct().OrderBy(x => x).ToList();
-            _run = new PromotionRunConfiguration { SelectedBots = requested, InstanceCount = selectedInstances.Count, SelectedInstanceIds = selectedInstances, CyclesPerBot = run.CyclesPerBot, SelectedAccounts = selectedInstances.Count == 1 ? accountsByInstance[selectedInstances[0]].ToList() : unionAccounts, AccountsByInstance = accountsByInstance, AccountCount = accountsByInstance.Values.Sum(x => x.Count) };
+            _run = new PromotionRunConfiguration { MaxSupportedInstanceCount = maximumInstances, SelectedBots = requested, InstanceCount = selectedInstances.Count, SelectedInstanceIds = selectedInstances, CyclesPerBot = run.CyclesPerBot, SelectedAccounts = selectedInstances.Count == 1 ? accountsByInstance[selectedInstances[0]].ToList() : unionAccounts, AccountsByInstance = accountsByInstance, AccountCount = accountsByInstance.Values.Sum(x => x.Count) };
             foreach (var assignment in accountsByInstance) Logger.Info($"[Account] Instance {assignment.Key} selected accounts: [{string.Join(",", assignment.Value)}]");
             Logger.Info("[Instance] Selected instances: [" + string.Join(",", selectedInstances) + "]");
             _config.BotList = requested;
             _config.InstanceCount = selectedInstances.Count;
+            _config.MaxSupportedInstanceCount = maximumInstances;
             _config.CyclesPerBot = run.CyclesPerBot;
             _manager = null;
             _startedAt = null;
@@ -95,6 +98,7 @@ public sealed class PromotionController
             if (!_config.AllSet) return Fail("Engine setup is incomplete: click positions are not configured.");
 
             _config.InstanceCount = _run.SelectedInstanceIds.Count;
+            _config.MaxSupportedInstanceCount = _run.MaxSupportedInstanceCount;
             _manager = new InstanceManager(_config, _run.SelectedInstanceIds);
             _manager.ConfigureAccounts(_run.AccountsByInstance.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<int>)pair.Value));
             _manager.SetAccountCompletionHandler(AdvanceAccountAsync);
@@ -280,6 +284,7 @@ public sealed class PromotionController
                       (!engine.IsFinished && progress.State.Contains("promotion running", StringComparison.OrdinalIgnoreCase)))))
                 .Select(engine => engine.InstanceId).OrderBy(id => id).ToList() ?? new List<int>(),
             CyclesPerBot = _run?.CyclesPerBot ?? 0,
+			MaxSupportedInstanceCount = _run?.MaxSupportedInstanceCount ?? GetMaximumInstanceCount(),
 			// Each existing engine instance processes the configured bot list independently.
 			TotalCycles = (_run?.SelectedBots.Count ?? 0) * (_run?.CyclesPerBot ?? 0) * (_run?.AccountsByInstance.Values.Sum(accounts => accounts.Count) ?? 0),
             CompletedCycles = manager?.Engines.Sum(x => x.CompletedCycles) ?? 0,
@@ -325,6 +330,13 @@ public sealed class PromotionController
         {
             _lastError = string.IsNullOrWhiteSpace(_lastError) ? error : _lastError + " | " + error;
         }
+    }
+
+    private int GetMaximumInstanceCount()
+    {
+        string configured = Environment.GetEnvironmentVariable("TELEGRAM_MAX_CHROMIUM_INSTANCES") ?? "";
+        int requested = int.TryParse(configured, out int value) ? value : _config.MaxSupportedInstanceCount;
+        return Math.Min(BotConfig.AbsoluteMaximumInstanceCount, Math.Max(1, requested));
     }
 
     private sealed record InstanceAccountProgress(int SelectedAccountIndex, int CurrentAccount, string State, string Error = "");

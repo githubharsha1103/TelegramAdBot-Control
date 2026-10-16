@@ -36,6 +36,9 @@ public class InstanceManager
 	public InstanceManager(BotConfig config)
 	{
 		_config = config;
+		int maxInstances = Math.Min(BotConfig.AbsoluteMaximumInstanceCount, Math.Max(1, config.MaxSupportedInstanceCount));
+		if (config.InstanceCount < 1 || config.InstanceCount > maxInstances)
+			throw new ArgumentOutOfRangeException(nameof(config.InstanceCount), $"Instance count must be between 1 and {maxInstances}.");
 		_cloneProfilesOnOpen = true;
 		for (int i = 1; i <= config.InstanceCount; i++)
 		{
@@ -46,8 +49,9 @@ public class InstanceManager
 	public InstanceManager(BotConfig config, IReadOnlyList<int> selectedInstanceIds)
 	{
 		_config = config;
-		if (selectedInstanceIds == null || selectedInstanceIds.Count == 0 || selectedInstanceIds.Any(id => id < 1 || id > 3))
-			throw new ArgumentException("Select one or more valid instance IDs from 1 to 3.", nameof(selectedInstanceIds));
+		int maxInstances = Math.Min(BotConfig.AbsoluteMaximumInstanceCount, Math.Max(1, config.MaxSupportedInstanceCount));
+		if (selectedInstanceIds == null || selectedInstanceIds.Count == 0 || selectedInstanceIds.Any(id => id < 1 || id > maxInstances))
+			throw new ArgumentException($"Select one or more valid instance IDs from 1 to {maxInstances}.", nameof(selectedInstanceIds));
 		foreach (int instanceId in selectedInstanceIds.Distinct().OrderBy(id => id)) AddEngine(instanceId);
 	}
 

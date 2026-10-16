@@ -6,6 +6,7 @@ namespace TelegramAdBot.Models;
 
 public class BotConfig
 {
+	public const int AbsoluteMaximumInstanceCount = 7;
 	public int WaitAfterSearch { get; set; } = 2000;
 
 	public int WaitAfterEmojiClick { get; set; } = 400;
@@ -25,6 +26,8 @@ public class BotConfig
 	public int WaitAfterStickerTab { get; set; } = 500;
 
 	public int InstanceCount { get; set; } = 3;
+
+	public int MaxSupportedInstanceCount { get; set; } = AbsoluteMaximumInstanceCount;
 
 	public int StaggerDelayMs { get; set; } = 2000;
 
