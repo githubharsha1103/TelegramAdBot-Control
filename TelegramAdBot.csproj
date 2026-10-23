@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="TelegramAdBot.ControlBot/**/*.cs" />
+    <Compile Remove="TelegramAdBot.Control.Tests/**/*.cs" />
     <EmbeddedResource Remove="TelegramAdBot.ControlBot/**" />
     <None Remove="TelegramAdBot.ControlBot/**" />
   </ItemGroup>

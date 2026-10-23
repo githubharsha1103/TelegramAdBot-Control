@@ -233,13 +233,14 @@ internal class Program
 		ConfigStorage.LoadPositions(_config);
 		_config.SetupDone = ConfigStorage.IsSetupDone();
 		var controller = new PromotionController(_config);
-		using var bot = new TelegramControlBot(controller, token!, adminId);
+		var bot = new TelegramControlBot(controller, token!, adminId);
 		bot.Start();
 		Logger.Info("[CONTROL] Integrated control bot ready; awaiting Telegram commands.");
 		var shutdown = new TaskCompletionSource();
 		Console.CancelKeyPress += (_, e) => { e.Cancel = true; shutdown.TrySetResult(); };
 		await shutdown.Task;
-		await controller.StopAsync();
+		try { await controller.StopAsync(); }
+		finally { await bot.DisposeAsync(); }
 		Logger.CloseFileLogging();
 	}
 

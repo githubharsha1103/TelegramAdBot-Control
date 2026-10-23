@@ -253,32 +253,26 @@ public sealed class PromotionController
         }
     }
 
-    public async Task<ControlResult> PauseAsync()
+    public Task<ControlResult> PauseAsync()
     {
-        await _commandLock.WaitAsync();
-        try
-        {
-            if (_manager?.AnyBrowserAlive != true) return Fail("Promotion is not running.");
-            if (_manager.Engines.All(x => x.IsPaused)) return Fail("Promotion is already paused.");
-            Logger.Info("[CONTROL] PAUSE requested.");
-            _manager.PauseAll();
-            return Ok("Promotion paused.");
-        }
-        finally { _commandLock.Release(); }
+        InstanceManager? manager = _manager;
+        if (_isStopping) return Task.FromResult(Fail("Promotion is stopping."));
+        if (manager?.AnyBrowserAlive != true) return Task.FromResult(Fail("Promotion is not running."));
+        if (manager.Engines.All(x => x.IsPaused)) return Task.FromResult(Fail("Promotion is already paused."));
+        Logger.Info("[CONTROL] PAUSE requested.");
+        manager.PauseAll();
+        return Task.FromResult(Ok("Promotion paused."));
     }
 
-    public async Task<ControlResult> ResumeAsync()
+    public Task<ControlResult> ResumeAsync()
     {
-        await _commandLock.WaitAsync();
-        try
-        {
-            if (_manager == null || !_manager.AnyBrowserAlive) return Fail("Promotion is not available to resume.");
-            if (_manager.Engines.All(x => !x.IsPaused)) return Fail("Promotion is not paused.");
-            Logger.Info("[CONTROL] RESUME requested.");
-            _manager.ResumeSequential();
-            return Ok("Promotion resumed.");
-        }
-        finally { _commandLock.Release(); }
+        InstanceManager? manager = _manager;
+        if (_isStopping) return Task.FromResult(Fail("Promotion is stopping."));
+        if (manager == null || !manager.AnyBrowserAlive) return Task.FromResult(Fail("Promotion is not available to resume."));
+        if (manager.Engines.All(x => !x.IsPaused)) return Task.FromResult(Fail("Promotion is not paused."));
+        Logger.Info("[CONTROL] RESUME requested.");
+        manager.ResumeSequential();
+        return Task.FromResult(Ok("Promotion resumed."));
     }
 
     public async Task<ControlResult> StopAsync()

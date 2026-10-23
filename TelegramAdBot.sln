@@ -5,6 +5,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TelegramAdBot", "TelegramAdBot.csproj", "{4749D169-DD87-4184-A8FF-85090153BF0A}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TelegramAdBot.Control.Tests", "TelegramAdBot.Control.Tests\TelegramAdBot.Control.Tests.csproj", "{AED574FE-02E9-4D8B-A07A-C273FD971AE1}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -18,5 +20,9 @@ Global
 		{4749D169-DD87-4184-A8FF-85090153BF0A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4749D169-DD87-4184-A8FF-85090153BF0A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4749D169-DD87-4184-A8FF-85090153BF0A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AED574FE-02E9-4D8B-A07A-C273FD971AE1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AED574FE-02E9-4D8B-A07A-C273FD971AE1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AED574FE-02E9-4D8B-A07A-C273FD971AE1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AED574FE-02E9-4D8B-A07A-C273FD971AE1}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
