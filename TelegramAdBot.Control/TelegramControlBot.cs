@@ -30,6 +30,8 @@ public sealed class TelegramControlBot : IDisposable
     private readonly ConcurrentDictionary<long, Session> _sessions = new();
     private readonly ConcurrentDictionary<long, int> _statusMessages = new();
     private readonly ConcurrentDictionary<long, int> _panelMessages = new();
+    private readonly ConcurrentDictionary<long, int> _menuKeyboardMessages = new();
+    private readonly ConcurrentDictionary<long, string> _panelCallbackTokens = new();
     private readonly ConcurrentDictionary<long, int> _selectionMessages = new();
     private readonly ConcurrentDictionary<long, int> _managementMessages = new();
     private readonly ConcurrentDictionary<long, int> _instanceMessages = new();
@@ -119,20 +121,20 @@ public sealed class TelegramControlBot : IDisposable
             await MainMenuAsync(chatId.Value, ct);
             return;
         }
-        if (text.Equals("Configure Promotion", StringComparison.OrdinalIgnoreCase)) { await BeginAsync(chatId.Value, ct); return; }
+        if (text.EndsWith("Configure Promotion", StringComparison.OrdinalIgnoreCase)) { await BeginAsync(chatId.Value, ct); return; }
         if (text.Equals("Main Menu", StringComparison.OrdinalIgnoreCase)) { await MainMenuAsync(chatId.Value, ct); return; }
-        if (text.Equals("Instances", StringComparison.OrdinalIgnoreCase)) { await InstanceMenuAsync(chatId.Value, ct); return; }
-        if (text.Equals("Manage Accounts", StringComparison.OrdinalIgnoreCase)) { await SafeSendAsync(chatId.Value, "Account selection is part of Configure Promotion. Use that menu to choose accounts for each instance.", InlineKeyboardMarkup.Empty(), ct); return; }
-        if (text.Equals("Manage Bots", StringComparison.OrdinalIgnoreCase)) { await ManageBotsAsync(chatId.Value, ct); return; }
-        if (text.Equals("Start", StringComparison.OrdinalIgnoreCase)) { await BeginAsync(chatId.Value, ct); return; }
-        if (text.Equals("Pause / Resume", StringComparison.OrdinalIgnoreCase))
+        if (text.EndsWith("Instances", StringComparison.OrdinalIgnoreCase)) { await InstanceMenuAsync(chatId.Value, ct); return; }
+        if (text.EndsWith("Accounts", StringComparison.OrdinalIgnoreCase) || text.Equals("Manage Accounts", StringComparison.OrdinalIgnoreCase)) { await BeginAsync(chatId.Value, ct); return; }
+        if (text.EndsWith("Bots", StringComparison.OrdinalIgnoreCase) || text.Equals("Manage Bots", StringComparison.OrdinalIgnoreCase)) { await ManageBotsAsync(chatId.Value, ct); return; }
+        if (text.EndsWith("Start", StringComparison.OrdinalIgnoreCase)) { await DashboardStartAsync(chatId.Value, ct); return; }
+        if (text.EndsWith("Pause / Resume", StringComparison.OrdinalIgnoreCase))
         {
             PromotionStatus current = _controller.GetStatus();
             await ResultAsync(chatId.Value, current.IsPaused ? await _controller.ResumeAsync() : await _controller.PauseAsync(), ct);
             return;
         }
-        if (text.Equals("Stop Promotion", StringComparison.OrdinalIgnoreCase)) { await ConfirmStopAsync(chatId.Value, ct); return; }
-        if (text.Equals("Status", StringComparison.OrdinalIgnoreCase)) { await StatusAsync(chatId.Value, ct); return; }
+        if (text.EndsWith("Stop Promotion", StringComparison.OrdinalIgnoreCase)) { await ConfirmStopAsync(chatId.Value, ct); return; }
+        if (text.EndsWith("Status", StringComparison.OrdinalIgnoreCase)) { await StatusAsync(chatId.Value, ct); return; }
         if (_addBotPending.TryGetValue(chatId.Value, out var expires))
         {
             if (DateTimeOffset.UtcNow > expires)
@@ -177,32 +179,58 @@ public sealed class TelegramControlBot : IDisposable
 
     private static ReplyKeyboardMarkup MainReplyKeyboard() => new(new[]
     {
-        new[] { new KeyboardButton("Configure Promotion"), new KeyboardButton("Instances") },
-        new[] { new KeyboardButton("Manage Accounts"), new KeyboardButton("Manage Bots") },
-        new[] { new KeyboardButton("Start"), new KeyboardButton("Pause / Resume") },
-        new[] { new KeyboardButton("Stop Promotion"), new KeyboardButton("Status") },
+        new[] { new KeyboardButton("⚙️ Configure Promotion"), new KeyboardButton("🖥 Instances") },
+        new[] { new KeyboardButton("👤 Accounts"), new KeyboardButton("🤖 Bots") },
+        new[] { new KeyboardButton("▶️ Start"), new KeyboardButton("⏸ Pause / Resume") },
+        new[] { new KeyboardButton("🛑 Stop Promotion"), new KeyboardButton("📊 Status") },
         new[] { new KeyboardButton("Main Menu") }
     }) { ResizeKeyboard = true, IsPersistent = true };
 
     private async Task MainMenuAsync(long chatId, CancellationToken ct)
     {
-        const string text = "🎛 Control Panel\nChoose an action below. Use /panel or Main Menu to return here.";
+        await RenderDashboardAsync(chatId, ct);
+        await SendMenuKeyboardAsync(chatId, ct);
+    }
+
+    private async Task RenderDashboardAsync(long chatId, CancellationToken ct)
+    {
+        PromotionStatus status = _controller.GetStatus();
+        string state = status.IsStopping ? "🔴 STOPPING" : status.IsPaused ? "🟡 PAUSED" : status.IsRunning ? "🔵 RUNNING" : status.StartTime.HasValue ? "🔴 STOPPED" : "🟢 IDLE";
+        string instances = status.SelectedInstanceIds.Count == 0 ? "—" : string.Join(", ", status.SelectedInstanceIds);
+        int openBrowsers = status.RunningInstanceIds.Concat(_controller.GetOpenManualInstanceIds()).Distinct().Count();
+        var lines = new List<string>
+        {
+            "🚀 Promotion Dashboard", "", state, "",
+            "Selected instances: " + instances,
+            $"Cycles: {status.CompletedCycles}/{status.TotalCycles}",
+            $"Open browsers: {openBrowsers}"
+        };
+        string error = !string.IsNullOrWhiteSpace(status.LastError) ? status.LastError :
+            status.Instances.Select(instance => instance.Error).FirstOrDefault(message => !string.IsNullOrWhiteSpace(message));
+        if (!string.IsNullOrWhiteSpace(error)) lines.Add("\n⚠️ " + error);
+
+        string token = Guid.NewGuid().ToString("N").Substring(0, 8);
+        _panelCallbackTokens[chatId] = token;
+        InlineKeyboardMarkup keyboard = DashboardKeyboard(token);
+        string text = string.Join("\n", lines);
         if (_panelMessages.TryGetValue(chatId, out int messageId))
         {
-            EditResult edit = await EditMessageSafeAsync(chatId, messageId, text, InlineKeyboardMarkup.Empty(), ct, "main-menu");
-            if (edit == EditResult.Success)
-            {
-                await SendMenuKeyboardAsync(chatId, ct);
-                return;
-            }
+            EditResult edit = await EditMessageSafeAsync(chatId, messageId, text, keyboard, ct, "main-dashboard");
+            if (edit == EditResult.Success) return;
             if (edit == EditResult.Failed) return;
             _panelMessages.TryRemove(chatId, out _);
         }
-
-        Message sent = await SafeSendAsync(chatId, text, InlineKeyboardMarkup.Empty(), ct, "main-menu");
+        Message sent = await SafeSendAsync(chatId, text, keyboard, ct, "main-dashboard");
         if (sent != null) _panelMessages[chatId] = sent.MessageId;
-        await SendMenuKeyboardAsync(chatId, ct);
     }
+
+    private static InlineKeyboardMarkup DashboardKeyboard(string token) => new(new[]
+    {
+        new[] { InlineKeyboardButton.WithCallbackData("⚙️ Configure", TaggedCallback("panel", token, "configure")), InlineKeyboardButton.WithCallbackData("▶️ Start", TaggedCallback("panel", token, "start")) },
+        new[] { InlineKeyboardButton.WithCallbackData("⏸ Pause / Resume", TaggedCallback("panel", token, "pause")), InlineKeyboardButton.WithCallbackData("🛑 Stop", TaggedCallback("panel", token, "stop")) },
+        new[] { InlineKeyboardButton.WithCallbackData("🖥 Instances", TaggedCallback("panel", token, "instances")), InlineKeyboardButton.WithCallbackData("👤 Accounts", TaggedCallback("panel", token, "accounts")), InlineKeyboardButton.WithCallbackData("🤖 Bots", TaggedCallback("panel", token, "bots")) },
+        new[] { InlineKeyboardButton.WithCallbackData("📊 Status", TaggedCallback("panel", token, "status")), InlineKeyboardButton.WithCallbackData("🔄 Refresh Panel", TaggedCallback("panel", token, "refresh")) }
+    });
 
     private async Task SendMenuKeyboardAsync(long chatId, CancellationToken ct)
     {
@@ -211,7 +239,16 @@ public sealed class TelegramControlBot : IDisposable
         try
         {
             await WaitForMessageRateLimitAsync(chatId, ct);
-            try { await _bot.SendMessage(chatId, "Control menu is available below. Use /panel to reopen it anytime.", replyMarkup: MainReplyKeyboard(), cancellationToken: ct); }
+            try
+            {
+                Message menuMessage = await _bot.SendMessage(chatId, "🎛 Menu", replyMarkup: MainReplyKeyboard(), cancellationToken: ct);
+                if (_menuKeyboardMessages.TryGetValue(chatId, out int previousMenuMessageId))
+                {
+                    try { await _bot.DeleteMessage(chatId, previousMenuMessageId, ct); }
+                    catch (Exception ex) { Helpers.Logger.Info("[CONTROL] Previous menu message cleanup skipped: " + ex.Message); }
+                }
+                _menuKeyboardMessages[chatId] = menuMessage.MessageId;
+            }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Reply keyboard send failed: " + ex.Message); }
             finally { _lastMessageOperation[chatId] = DateTimeOffset.UtcNow; }
@@ -241,6 +278,26 @@ public sealed class TelegramControlBot : IDisposable
 
     private async Task CallbackCoreAsync(long chatId, int? messageId, string data, CancellationToken ct)
     {
+        if (TryReadTaggedCallback(data, "panel", out string panelToken, out string panelAction))
+        {
+            if (!_panelMessages.TryGetValue(chatId, out int activePanelId) || messageId != activePanelId ||
+                !_panelCallbackTokens.TryGetValue(chatId, out string currentPanelToken) || currentPanelToken != panelToken) return;
+            if (panelAction == "configure") { await BeginAsync(chatId, ct); return; }
+            if (panelAction == "start") { await DashboardStartAsync(chatId, ct); return; }
+            if (panelAction == "pause")
+            {
+                PromotionStatus current = _controller.GetStatus();
+                await ResultAsync(chatId, current.IsPaused ? await _controller.ResumeAsync() : await _controller.PauseAsync(), ct);
+                return;
+            }
+            if (panelAction == "stop") { await ConfirmStopAsync(chatId, ct); return; }
+            if (panelAction == "instances") { await InstanceMenuAsync(chatId, ct); return; }
+            if (panelAction == "accounts") { await BeginAsync(chatId, ct); return; }
+            if (panelAction == "bots") { await ManageBotsAsync(chatId, ct); return; }
+            if (panelAction == "status") { await StatusAsync(chatId, ct); return; }
+            if (panelAction == "refresh") { await RenderDashboardAsync(chatId, ct); return; }
+            return;
+        }
         if (data.StartsWith("sel:", StringComparison.Ordinal))
         {
             if (!_sessions.TryGetValue(chatId, out var session) || !TryReadSelectionCallback(data, session, out string action)) return;
@@ -288,7 +345,7 @@ public sealed class TelegramControlBot : IDisposable
                 !_instanceCallbackTokens.TryGetValue(chatId, out string currentToken) || currentToken != instanceToken) return;
             data = "instance:" + instanceAction;
         }
-        else if (data.StartsWith("status:", StringComparison.Ordinal) || data.StartsWith("manage:", StringComparison.Ordinal) || data.StartsWith("remove:", StringComparison.Ordinal) || data.StartsWith("instance:", StringComparison.Ordinal)) return;
+        else if (data.StartsWith("panel:", StringComparison.Ordinal) || data.StartsWith("status:", StringComparison.Ordinal) || data.StartsWith("manage:", StringComparison.Ordinal) || data.StartsWith("remove:", StringComparison.Ordinal) || data.StartsWith("instance:", StringComparison.Ordinal)) return;
 
         if (data == "manage:open") { await ManageBotsAsync(chatId, ct); return; }
         if (data == "instance:refresh" || data == "instance:back") { await InstanceMenuAsync(chatId, ct); return; }
@@ -468,11 +525,29 @@ public sealed class TelegramControlBot : IDisposable
     private async Task ResultAsync(long chatId, ControlResult result, CancellationToken ct)
     {
         await StatusAsync(chatId, ct);
+        await RenderDashboardAsync(chatId, ct);
         if (!result.Success && (!_lastNotification.TryGetValue(chatId, out string previous) || previous != result.Message))
         {
             _lastNotification[chatId] = result.Message;
             await SafeSendAsync(chatId, "⚠️ " + result.Message, null, ct);
         }
+    }
+
+    private async Task DashboardStartAsync(long chatId, CancellationToken ct)
+    {
+        PromotionStatus current = _controller.GetStatus();
+        if (current.IsRunning || current.IsPaused || current.IsStopping)
+        {
+            await RenderDashboardAsync(chatId, ct);
+            return;
+        }
+        if (!current.IsConfigured)
+        {
+            await BeginAsync(chatId, ct);
+            return;
+        }
+        await ResultAsync(chatId, await _controller.StartAsync(), ct);
+        if (_controller.GetStatus().IsRunning) StartStatusRefresh(chatId);
     }
     private async Task ManageBotsAsync(long chatId, CancellationToken ct)
     {
@@ -736,7 +811,7 @@ public sealed class TelegramControlBot : IDisposable
         try
         {
             await WaitForMessageRateLimitAsync(chatId, ct);
-            try { return await _bot.SendMessage(chatId, text, replyMarkup: keyboard.InlineKeyboard.Any() ? keyboard : MainReplyKeyboard(), cancellationToken: ct); }
+            try { return await _bot.SendMessage(chatId, text, replyMarkup: keyboard == null ? null : keyboard.InlineKeyboard.Any() ? keyboard : MainReplyKeyboard(), cancellationToken: ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) { Helpers.Logger.Warning($"[CONTROL] Telegram send failed: chat_id={chatId} action={actionName} error={ex.Message}"); return null; }
             finally { _lastMessageOperation[chatId] = DateTimeOffset.UtcNow; }
