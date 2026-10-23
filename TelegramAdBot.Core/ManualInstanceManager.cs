@@ -45,7 +45,7 @@ public sealed class ManualInstanceManager
 			if (File.Exists(AppDataPaths.ManualInstancesFile))
 			{
 				int[]? saved = JsonSerializer.Deserialize<int[]>(File.ReadAllText(AppDataPaths.ManualInstancesFile));
-				if (saved != null) foreach (int id in saved) if (id >= 1 && id <= MaximumInstanceCount) ids.Add(id);
+				if (saved != null) foreach (int id in saved) if (id >= 1 && id <= MaximumInstanceCount && Directory.Exists(AppDataPaths.ProfilePath(id))) ids.Add(id);
 			}
 		}
 		catch (Exception ex) { Logger.Warning("Could not read manual instance registry: " + ex.Message); }

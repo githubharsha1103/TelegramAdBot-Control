@@ -317,11 +317,21 @@ public sealed class TelegramControlBot : IDisposable
             if (action == "all") { session.SelectedBots = session.AvailableBots.ToHashSet(); await BotPickerAsync(chatId, ct); return; }
             if (action == "clear") { session.SelectedBots.Clear(); await BotPickerAsync(chatId, ct); return; }
             if (action == "continue") { if (session.SelectedBots.Count == 0) { await BotPickerAsync(chatId, ct); return; } session.Step = Step.Instances; await InstancePickerAsync(chatId, ct); return; }
-            if (action.StartsWith("instance:", StringComparison.Ordinal)) { if (int.TryParse(action.Substring(9), out int instance) && instance >= 1 && instance <= _controller.MaxSupportedInstanceCount) { if (!session.SelectedInstances.Add(instance)) session.SelectedInstances.Remove(instance); await InstancePickerAsync(chatId, ct); } return; }
+            if (action.StartsWith("instance:", StringComparison.Ordinal))
+            {
+                int[] configuredIds = _controller.GetConfiguredInstanceIds().ToArray();
+                if (int.TryParse(action.Substring(9), out int instance) && Array.BinarySearch(configuredIds, instance) >= 0)
+                {
+                    if (!session.SelectedInstances.Add(instance)) session.SelectedInstances.Remove(instance);
+                    await InstancePickerAsync(chatId, ct);
+                }
+                return;
+            }
             if (action.StartsWith("instances:page:", StringComparison.Ordinal) && int.TryParse(action.Substring("instances:page:".Length), out int page))
             {
-                int maxPage = (_controller.MaxSupportedInstanceCount - 1) / InstancePageSize;
-                if (page >= 0 && page <= maxPage) { session.InstancePage = page; await InstancePickerAsync(chatId, ct); }
+                int totalInstances = _controller.GetConfiguredInstanceIds().Count;
+                int totalPages = (int)(((long)totalInstances + InstancePageSize - 1) / InstancePageSize);
+                if (page >= 0 && page < totalPages) { session.InstancePage = page; await InstancePickerAsync(chatId, ct); }
                 return;
             }
             if (action == "instances:continue") { if (session.SelectedInstances.Count == 0) { await InstancePickerAsync(chatId, ct, "Select at least one instance to continue."); return; } session.InstanceCount = session.SelectedInstances.Count; session.CurrentAccountInstance = session.SelectedInstances.Min(); foreach (int id in session.SelectedInstances) if (!session.AccountsByInstance.ContainsKey(id)) session.AccountsByInstance[id] = new HashSet<int>(); session.Step = Step.Accounts; await AccountPickerAsync(chatId, ct); return; }
@@ -442,22 +452,24 @@ public sealed class TelegramControlBot : IDisposable
     private async Task InstancePickerAsync(long chatId, CancellationToken ct, string notice = "")
     {
         var s = _sessions[chatId];
-        int maxInstances = _controller.MaxSupportedInstanceCount;
-        int maxPage = (maxInstances - 1) / InstancePageSize;
-        int page = Math.Min(s.InstancePage, maxPage);
-        long firstId = (long)page * InstancePageSize + 1;
-        int visibleCount = (int)Math.Min(InstancePageSize, maxInstances - firstId + 1);
-        string title = $"🖥 Select promotion instances (IDs 1–{maxInstances})\nPage {page + 1}/{maxPage + 1}";
+        int[] configuredIds = _controller.GetConfiguredInstanceIds().Distinct().OrderBy(id => id).ToArray();
+        int totalPages = (int)(((long)configuredIds.Length + InstancePageSize - 1) / InstancePageSize);
+        int page = totalPages == 0 ? 0 : Math.Clamp(s.InstancePage, 0, totalPages - 1);
+        s.InstancePage = page;
+        int pageCount = Math.Min(InstancePageSize, configuredIds.Length - page * InstancePageSize);
+        int[] visibleIds = configuredIds.Skip(page * InstancePageSize).Take(pageCount).ToArray();
+        string title = totalPages == 0
+            ? "🖥 No configured instances are available. Create an instance from Instances or /instance, then return here."
+            : $"🖥 Select promotion instances\nPage {page + 1}/{totalPages}";
         if (!string.IsNullOrEmpty(notice)) title = "⚠️ " + notice + "\n" + title;
         await EditSelectionAsync(chatId, s, title, revision =>
         {
-            var ids = Enumerable.Range((int)firstId, visibleCount).ToArray();
-            var rows = ids.Chunk(2).Select(pair => pair.Select(id => InlineKeyboardButton.WithCallbackData((s.SelectedInstances.Contains(id) ? "✅ " : "⬜ ") + "Instance " + id, SelectionCallback(revision, "instance:" + id))).ToArray()).ToList();
-            if (page > 0 || page < maxPage)
+            var rows = visibleIds.Chunk(2).Select(pair => pair.Select(id => InlineKeyboardButton.WithCallbackData((s.SelectedInstances.Contains(id) ? "✅ " : "⬜ ") + "Instance " + id, SelectionCallback(revision, "instance:" + id))).ToArray()).ToList();
+            if (page > 0 || page < totalPages - 1)
             {
                 var navigation = new List<InlineKeyboardButton>();
                 if (page > 0) navigation.Add(InlineKeyboardButton.WithCallbackData("⬅️ Previous", SelectionCallback(revision, "instances:page:" + (page - 1))));
-                if (page < maxPage) navigation.Add(InlineKeyboardButton.WithCallbackData("Next ➡️", SelectionCallback(revision, "instances:page:" + (page + 1))));
+                if (page < totalPages - 1) navigation.Add(InlineKeyboardButton.WithCallbackData("Next ➡️", SelectionCallback(revision, "instances:page:" + (page + 1))));
                 rows.Add(navigation.ToArray());
             }
             rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Back", SelectionCallback(revision, "back")), InlineKeyboardButton.WithCallbackData("Continue", SelectionCallback(revision, "instances:continue")), InlineKeyboardButton.WithCallbackData("Cancel", SelectionCallback(revision, "cancel")) });

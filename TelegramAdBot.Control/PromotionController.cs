@@ -37,6 +37,7 @@ public sealed class PromotionController
     public bool RemoveBot(string username) => _botConfig.Remove(username);
     public int ManualInstanceLimit => _manualInstances.MaximumInstanceCount;
     public IReadOnlyList<int> GetRegisteredManualInstanceIds() => _manualInstances.GetRegisteredInstanceIds();
+    public IReadOnlyList<int> GetConfiguredInstanceIds() => _manualInstances.GetRegisteredInstanceIds();
     public bool CanCreateManualInstance => _manualInstances.CanCreateInstance;
     public bool CanManageInstance(int instanceId) => _manualInstances.CanManage(instanceId) && !IsInstanceInActivePromotion(instanceId);
     public bool IsManualInstanceOpen(int instanceId) => _manualInstances.IsOpen(instanceId);
