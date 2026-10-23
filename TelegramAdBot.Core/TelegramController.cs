@@ -49,8 +49,8 @@ public class TelegramController : IAsyncDisposable
 				return false;
 			}
 			string sessionDir = AppDataPaths.ProfilePath(_instanceId);
-			int xPos = 50 + (_instanceId - 1) * 60;
-			int yPos = 50 + (_instanceId - 1) * 60;
+			int xPos = 50 + ((_instanceId - 1) % 10) * 60;
+			int yPos = 50 + (((_instanceId - 1) / 10) % 10) * 60;
 			Logger.Step("Using Chromium: " + chromiumPath, _instanceId);
 			Logger.Step($"Launching Chromium ({_config.BrowserWidth}x{_config.BrowserHeight})...", _instanceId);
 			_context = await _playwright.Chromium.LaunchPersistentContextAsync(sessionDir, new BrowserTypeLaunchPersistentContextOptions

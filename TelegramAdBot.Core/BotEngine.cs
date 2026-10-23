@@ -104,6 +104,7 @@ public class BotEngine
 
 	public BotEngine(BotConfig config, int instanceId)
 	{
+		if (instanceId < 1) throw new ArgumentOutOfRangeException(nameof(instanceId), "Instance IDs must be positive.");
 		_config = config;
 		_instanceId = instanceId;
 		_promoIndex = instanceId - 1;

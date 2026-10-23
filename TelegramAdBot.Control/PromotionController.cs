@@ -95,7 +95,9 @@ public sealed class PromotionController
             if (requested.Count == 0) return Fail("Select at least one bot.");
             if (requested.Any(x => !available.Contains(x, StringComparer.OrdinalIgnoreCase))) return Fail("One or more selected bots are no longer available.");
             int maximumInstances = GetMaximumInstanceCount();
-            var selectedInstances = (run.SelectedInstanceIds ?? new List<int>()).Distinct().OrderBy(x => x).ToList();
+            var requestedInstances = run.SelectedInstanceIds ?? new List<int>();
+            if (requestedInstances.Count != requestedInstances.Distinct().Count()) return Fail("Instance IDs must be unique.");
+            var selectedInstances = requestedInstances.OrderBy(x => x).ToList();
             if (selectedInstances.Count == 0 || selectedInstances.Any(id => id < 1 || id > maximumInstances)) return Fail($"Select one or more instances from 1 to {maximumInstances}.");
             if (run.InstanceCount != selectedInstances.Count) return Fail("Selected instance count does not match the selected instance IDs.");
             if (run.CyclesPerBot < 1 || run.CyclesPerBot > 100000) return Fail("Cycles per bot must be between 1 and 100000.");
@@ -381,9 +383,7 @@ public sealed class PromotionController
 
     private int GetMaximumInstanceCount()
     {
-        string configured = Environment.GetEnvironmentVariable("TELEGRAM_MAX_CHROMIUM_INSTANCES") ?? "";
-        int requested = int.TryParse(configured, out int value) ? value : _config.MaxSupportedInstanceCount;
-        return Math.Min(BotConfig.AbsoluteMaximumInstanceCount, Math.Max(1, requested));
+		return BotConfig.ResolveMaximumInstanceCount(_config.MaxSupportedInstanceCount);
     }
 
     private sealed record InstanceAccountProgress(int SelectedAccountIndex, int CurrentAccount, string State, string Error = "");

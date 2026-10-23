@@ -8,7 +8,11 @@ The promotion engine and Telegram control bot run together in one process. The p
 TELEGRAM_CONTROL_BOT_TOKEN=token-from-BotFather
 ADMIN_TELEGRAM_ID=your-numeric-Telegram-user-id
 DISPLAY=:1
+# Optional positive maximum instance ID available in the Telegram selector
+TELEGRAM_MAX_CHROMIUM_INSTANCES=24
 ```
+
+`TELEGRAM_MAX_CHROMIUM_INSTANCES` accepts any positive 32-bit integer. If omitted, the selector accepts positive instance IDs across the full integer range. Increasing this value only expands the selectable IDs; a promotion creates engines only for the IDs explicitly selected in Configure Promotion. Telegram shows the selector in pages.
 
 Never commit this file with real values.
 

@@ -21,6 +21,7 @@ namespace TelegramAdBot.Control;
 // Telegram UI only. It directly calls PromotionController and never creates engine workers.
 public sealed class TelegramControlBot : IDisposable
 {
+    private const int InstancePageSize = 20;
     private readonly PromotionController _controller;
 
     private readonly long _adminId;
@@ -317,6 +318,12 @@ public sealed class TelegramControlBot : IDisposable
             if (action == "clear") { session.SelectedBots.Clear(); await BotPickerAsync(chatId, ct); return; }
             if (action == "continue") { if (session.SelectedBots.Count == 0) { await BotPickerAsync(chatId, ct); return; } session.Step = Step.Instances; await InstancePickerAsync(chatId, ct); return; }
             if (action.StartsWith("instance:", StringComparison.Ordinal)) { if (int.TryParse(action.Substring(9), out int instance) && instance >= 1 && instance <= _controller.MaxSupportedInstanceCount) { if (!session.SelectedInstances.Add(instance)) session.SelectedInstances.Remove(instance); await InstancePickerAsync(chatId, ct); } return; }
+            if (action.StartsWith("instances:page:", StringComparison.Ordinal) && int.TryParse(action.Substring("instances:page:".Length), out int page))
+            {
+                int maxPage = (_controller.MaxSupportedInstanceCount - 1) / InstancePageSize;
+                if (page >= 0 && page <= maxPage) { session.InstancePage = page; await InstancePickerAsync(chatId, ct); }
+                return;
+            }
             if (action == "instances:continue") { if (session.SelectedInstances.Count == 0) { await InstancePickerAsync(chatId, ct, "Select at least one instance to continue."); return; } session.InstanceCount = session.SelectedInstances.Count; session.CurrentAccountInstance = session.SelectedInstances.Min(); foreach (int id in session.SelectedInstances) if (!session.AccountsByInstance.ContainsKey(id)) session.AccountsByInstance[id] = new HashSet<int>(); session.Step = Step.Accounts; await AccountPickerAsync(chatId, ct); return; }
             if (action.StartsWith("account:", StringComparison.Ordinal)) { if (int.TryParse(action.Substring(8), out int account) && account is >= 1 and <= 3) { var accounts = session.AccountsForCurrentInstance; if (!accounts.Add(account)) accounts.Remove(account); await AccountPickerAsync(chatId, ct); } return; }
             if (action == "accounts:continue") { if (session.AccountsForCurrentInstance.Count == 0) { await AccountPickerAsync(chatId, ct, "Select at least one account to continue."); return; } if (session.AdvanceAccountInstance()) await AccountPickerAsync(chatId, ct); else { session.Step = Step.Cycles; await CyclePromptAsync(chatId, ct); } return; }
@@ -435,11 +442,24 @@ public sealed class TelegramControlBot : IDisposable
     private async Task InstancePickerAsync(long chatId, CancellationToken ct, string notice = "")
     {
         var s = _sessions[chatId];
-        string title = $"🖥 Select promotion instances (1–{_controller.MaxSupportedInstanceCount})";
+        int maxInstances = _controller.MaxSupportedInstanceCount;
+        int maxPage = (maxInstances - 1) / InstancePageSize;
+        int page = Math.Min(s.InstancePage, maxPage);
+        long firstId = (long)page * InstancePageSize + 1;
+        int visibleCount = (int)Math.Min(InstancePageSize, maxInstances - firstId + 1);
+        string title = $"🖥 Select promotion instances (IDs 1–{maxInstances})\nPage {page + 1}/{maxPage + 1}";
         if (!string.IsNullOrEmpty(notice)) title = "⚠️ " + notice + "\n" + title;
         await EditSelectionAsync(chatId, s, title, revision =>
         {
-            var rows = Enumerable.Range(1, _controller.MaxSupportedInstanceCount).Select(id => new[] { InlineKeyboardButton.WithCallbackData((s.SelectedInstances.Contains(id) ? "✅ " : "⬜ ") + "Instance " + id, SelectionCallback(revision, "instance:" + id)) }).ToList();
+            var ids = Enumerable.Range((int)firstId, visibleCount).ToArray();
+            var rows = ids.Chunk(2).Select(pair => pair.Select(id => InlineKeyboardButton.WithCallbackData((s.SelectedInstances.Contains(id) ? "✅ " : "⬜ ") + "Instance " + id, SelectionCallback(revision, "instance:" + id))).ToArray()).ToList();
+            if (page > 0 || page < maxPage)
+            {
+                var navigation = new List<InlineKeyboardButton>();
+                if (page > 0) navigation.Add(InlineKeyboardButton.WithCallbackData("⬅️ Previous", SelectionCallback(revision, "instances:page:" + (page - 1))));
+                if (page < maxPage) navigation.Add(InlineKeyboardButton.WithCallbackData("Next ➡️", SelectionCallback(revision, "instances:page:" + (page + 1))));
+                rows.Add(navigation.ToArray());
+            }
             rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Back", SelectionCallback(revision, "back")), InlineKeyboardButton.WithCallbackData("Continue", SelectionCallback(revision, "instances:continue")), InlineKeyboardButton.WithCallbackData("Cancel", SelectionCallback(revision, "cancel")) });
             return new InlineKeyboardMarkup(rows);
         }, ct);
@@ -905,6 +925,7 @@ public sealed class TelegramControlBot : IDisposable
         public bool PreviousAccountInstance() { var ids = SelectedInstances.OrderBy(x => x).ToList(); int index = ids.IndexOf(CurrentAccountInstance); if (index <= 0) return false; CurrentAccountInstance = ids[index - 1]; return true; }
         public void LastAccountInstance() => CurrentAccountInstance = SelectedInstances.OrderBy(x => x).Last();
         public int InstanceCount { get; set; }
+        public int InstancePage { get; set; }
         public int Cycles { get; set; }
         public Step Step { get; set; }
         public int SelectionRevision { get; set; }

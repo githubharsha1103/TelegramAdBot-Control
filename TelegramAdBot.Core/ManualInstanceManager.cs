@@ -49,9 +49,21 @@ public sealed class ManualInstanceManager
 			}
 		}
 		catch (Exception ex) { Logger.Warning("Could not read manual instance registry: " + ex.Message); }
-		// Adopt existing profiles so installations predating the registry keep their instances.
-		for (int id = 1; id <= MaximumInstanceCount; id++)
-			if (Directory.Exists(AppDataPaths.ProfilePath(id))) ids.Add(id);
+		// Adopt existing profiles without scanning every possible ID when the configured limit is large.
+		try
+		{
+			if (Directory.Exists(AppDataPaths.ProfilesFolder))
+			{
+				foreach (string profileDirectory in Directory.EnumerateDirectories(AppDataPaths.ProfilesFolder, "profile_*", SearchOption.TopDirectoryOnly))
+				{
+					string name = Path.GetFileName(profileDirectory);
+					if (name.StartsWith("profile_", StringComparison.OrdinalIgnoreCase) &&
+						int.TryParse(name.Substring("profile_".Length), out int id) && id >= 1 && id <= MaximumInstanceCount &&
+						string.Equals(name, $"profile_{id}", StringComparison.OrdinalIgnoreCase)) ids.Add(id);
+				}
+			}
+		}
+		catch (Exception ex) { Logger.Warning("Could not discover existing instance profiles: " + ex.Message); }
 		return ids.OrderBy(id => id).ToList();
 	}
 
@@ -92,10 +104,15 @@ public sealed class ManualInstanceManager
 
 	private int? FindNextAvailableId()
 	{
-		HashSet<int> registered = GetRegisteredInstanceIds().ToHashSet();
-		for (int id = 1; id <= MaximumInstanceCount; id++)
-			if (!registered.Contains(id) && !Directory.Exists(AppDataPaths.ProfilePath(id))) return id;
-		return null;
+		int candidate = 1;
+		foreach (int id in GetRegisteredInstanceIds())
+		{
+			if (id < candidate) continue;
+			if (id > candidate) break;
+			if (candidate == int.MaxValue) return null;
+			candidate++;
+		}
+		return candidate <= MaximumInstanceCount ? candidate : null;
 	}
 
 	public bool IsOpen(int instanceId)
@@ -116,9 +133,7 @@ public sealed class ManualInstanceManager
 	{
 		get
 		{
-			string configured = Environment.GetEnvironmentVariable("TELEGRAM_MAX_CHROMIUM_INSTANCES") ?? "";
-			int requested = int.TryParse(configured, out int value) ? value : _config.MaxSupportedInstanceCount;
-			return Math.Min(BotConfig.AbsoluteMaximumInstanceCount, Math.Max(1, requested));
+			return BotConfig.ResolveMaximumInstanceCount(_config.MaxSupportedInstanceCount);
 		}
 	}
 
@@ -156,7 +171,9 @@ public sealed class ManualInstanceManager
 			startInfo.ArgumentList.Add("--no-sandbox");
 			startInfo.ArgumentList.Add("--disable-dev-shm-usage");
 			startInfo.ArgumentList.Add($"--window-size={_config.BrowserWidth},{_config.BrowserHeight}");
-			startInfo.ArgumentList.Add($"--window-position={50 + (instanceId - 1) * 60},{50 + (instanceId - 1) * 60}");
+			int xOffset = ((instanceId - 1) % 10) * 60;
+			int yOffset = (((instanceId - 1) / 10) % 10) * 60;
+			startInfo.ArgumentList.Add($"--window-position={50 + xOffset},{50 + yOffset}");
 			startInfo.ArgumentList.Add("--new-window");
 			startInfo.ArgumentList.Add(_config.TelegramWebUrl);
 

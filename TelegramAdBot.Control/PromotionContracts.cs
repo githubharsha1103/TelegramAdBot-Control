@@ -6,7 +6,7 @@ namespace TelegramAdBot.Control;
 
 public sealed class PromotionRunConfiguration
 {
-    public int MaxSupportedInstanceCount { get; set; } = BotConfig.AbsoluteMaximumInstanceCount;
+    public int MaxSupportedInstanceCount { get; set; } = int.MaxValue;
     public List<string> SelectedBots { get; set; } = new();
     public int InstanceCount { get; set; }
     public List<int> SelectedInstanceIds { get; set; } = new();
@@ -18,7 +18,7 @@ public sealed class PromotionRunConfiguration
 
 public sealed class PromotionStatus
 {
-    public int MaxSupportedInstanceCount { get; set; } = BotConfig.AbsoluteMaximumInstanceCount;
+    public int MaxSupportedInstanceCount { get; set; } = int.MaxValue;
     public bool IsRunning { get; set; }
     public bool IsPaused { get; set; }
     public bool IsStopping { get; set; }

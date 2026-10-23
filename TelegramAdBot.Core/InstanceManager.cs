@@ -13,8 +13,6 @@ public class InstanceManager
 	private readonly BotConfig _config;
 
 	private readonly List<BotEngine> _engines = new List<BotEngine>();
-	private readonly bool _cloneProfilesOnOpen;
-
 	private int _finishedCount;
 
 	private readonly object _finishLock = new object();
@@ -33,30 +31,30 @@ public class InstanceManager
 
 	public event Action? OnAllFinished;
 
-	public InstanceManager(BotConfig config)
-	{
-		_config = config;
-		int maxInstances = Math.Min(BotConfig.AbsoluteMaximumInstanceCount, Math.Max(1, config.MaxSupportedInstanceCount));
-		if (config.InstanceCount < 1 || config.InstanceCount > maxInstances)
-			throw new ArgumentOutOfRangeException(nameof(config.InstanceCount), $"Instance count must be between 1 and {maxInstances}.");
-		_cloneProfilesOnOpen = true;
-		for (int i = 1; i <= config.InstanceCount; i++)
-		{
-			AddEngine(i);
-		}
-	}
+	public InstanceManager(BotConfig config) : this(config, RequireSingleInstanceSelection(config)) { }
 
 	public InstanceManager(BotConfig config, IReadOnlyList<int> selectedInstanceIds)
 	{
 		_config = config;
-		int maxInstances = Math.Min(BotConfig.AbsoluteMaximumInstanceCount, Math.Max(1, config.MaxSupportedInstanceCount));
+		int maxInstances = BotConfig.ResolveMaximumInstanceCount(config.MaxSupportedInstanceCount);
 		if (selectedInstanceIds == null || selectedInstanceIds.Count == 0 || selectedInstanceIds.Any(id => id < 1 || id > maxInstances))
 			throw new ArgumentException($"Select one or more valid instance IDs from 1 to {maxInstances}.", nameof(selectedInstanceIds));
-		foreach (int instanceId in selectedInstanceIds.Distinct().OrderBy(id => id)) AddEngine(instanceId);
+		if (selectedInstanceIds.Count != selectedInstanceIds.Distinct().Count())
+			throw new ArgumentException("Instance IDs must be unique.", nameof(selectedInstanceIds));
+		foreach (int instanceId in selectedInstanceIds.OrderBy(id => id)) AddEngine(instanceId);
+	}
+
+	private static IReadOnlyList<int> RequireSingleInstanceSelection(BotConfig config)
+	{
+		if (config.InstanceCount != 1)
+			throw new ArgumentException("Pass the explicitly selected instance IDs to the InstanceManager constructor.", nameof(config));
+		return new[] { 1 };
 	}
 
 	private void AddEngine(int instanceId)
 	{
+		if (instanceId < 1 || _engines.Any(engine => engine.InstanceId == instanceId))
+			throw new ArgumentException($"Instance ID {instanceId} is invalid or already assigned.", nameof(instanceId));
 		BotEngine engine = new BotEngine(_config, instanceId);
 		engine.OnFinished += HandleEngineFinished;
 		_engines.Add(engine);
@@ -85,8 +83,7 @@ public class InstanceManager
 			Logger.Error("Bot list empty.");
 			return;
 		}
-		if (_cloneProfilesOnOpen) TelegramController.CloneSessionIfNeeded(_config.InstanceCount);
-		Logger.Info($"PHASE 1: Launching {_config.InstanceCount} browsers");
+		Logger.Info($"PHASE 1: Launching {_engines.Count} selected browsers");
 		for (int i = 0; i < _engines.Count; i++)
 		{
 			BotEngine engine = _engines[i];

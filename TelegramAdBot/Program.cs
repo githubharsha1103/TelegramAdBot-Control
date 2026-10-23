@@ -32,6 +32,7 @@ internal class Program
 			return;
 		}
 		AppDataPaths.EnsureDirectories();
+		_config.MaxSupportedInstanceCount = BotConfig.ResolveMaximumInstanceCount(_config.MaxSupportedInstanceCount);
 		Logger.InitFileLogging();
 		if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TELEGRAM_CONTROL_BOT_TOKEN")))
 		{
@@ -158,7 +159,7 @@ internal class Program
                 }
 
                 Console.WriteLine();
-                Console.WriteLine("Select browser instances (1, 2, 3; for example: 1,3):");
+                Console.WriteLine($"Select browser instances (IDs 1–{_config.MaxSupportedInstanceCount}; for example: 1,3):");
 
                 while (true)
                 {
@@ -168,7 +169,7 @@ internal class Program
                         bool valid = true;
                         foreach (string part in input.Split(',', StringSplitOptions.RemoveEmptyEntries))
                         {
-                                if (!int.TryParse(part.Trim(), out int instanceId) || instanceId < 1 || instanceId > 3)
+                                if (!int.TryParse(part.Trim(), out int instanceId) || instanceId < 1 || instanceId > _config.MaxSupportedInstanceCount)
                                 {
                                         valid = false;
                                         break;
@@ -183,7 +184,7 @@ internal class Program
                                 break;
                         }
 
-                        Console.WriteLine("Select at least one instance using IDs 1, 2, and/or 3.");
+                        Console.WriteLine($"Select at least one unique instance ID from 1 to {_config.MaxSupportedInstanceCount}.");
                 }
 
                 Console.WriteLine();

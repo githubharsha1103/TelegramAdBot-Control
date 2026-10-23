@@ -6,7 +6,13 @@ namespace TelegramAdBot.Models;
 
 public class BotConfig
 {
-	public const int AbsoluteMaximumInstanceCount = 7;
+	public const string MaximumInstanceCountEnvironmentVariable = "TELEGRAM_MAX_CHROMIUM_INSTANCES";
+	public static int ResolveMaximumInstanceCount(int configuredValue)
+	{
+		string configured = System.Environment.GetEnvironmentVariable(MaximumInstanceCountEnvironmentVariable) ?? "";
+		if (int.TryParse(configured, out int environmentValue) && environmentValue > 0) return environmentValue;
+		return configuredValue > 0 ? configuredValue : int.MaxValue;
+	}
 	public int WaitAfterSearch { get; set; } = 2000;
 
 	public int WaitAfterEmojiClick { get; set; } = 400;
@@ -27,7 +33,7 @@ public class BotConfig
 
 	public int InstanceCount { get; set; } = 3;
 
-	public int MaxSupportedInstanceCount { get; set; } = AbsoluteMaximumInstanceCount;
+	public int MaxSupportedInstanceCount { get; set; } = int.MaxValue;
 
 	public int StaggerDelayMs { get; set; } = 2000;
 
