@@ -29,6 +29,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     private readonly long _adminId;
     private readonly TelegramBotClient _bot;
     private readonly ControlMessageCoordinator _screenCoordinator;
+    private readonly TelegramControlStateStore _controlStateStore;
     private readonly HttpClient _apiHttpClient;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<long, Session> _sessions = new();
@@ -94,8 +95,29 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         };
         _apiHttpClient = new HttpClient(handler, disposeHandler: true);
         _bot = new TelegramBotClient(token, _apiHttpClient);
+        _controlStateStore = new TelegramControlStateStore(
+            System.IO.Path.Combine(Helpers.AppDataPaths.Root, "telegram_control_state.json"),
+            message => Helpers.Logger.Warning("[CONTROL] " + message));
         _screenCoordinator = new ControlMessageCoordinator(EditScreenTransportAsync, SendScreenTransportAsync,
             message => Helpers.Logger.Info("[CONTROL] " + message));
+        foreach (var (chatId, state) in _controlStateStore.Snapshot())
+        {
+            if (state.RateLimitedUntil is DateTimeOffset blockedUntil && blockedUntil > DateTimeOffset.UtcNow)
+                _rateLimitedUntil[chatId] = blockedUntil;
+            if (state.MenuKeyboardMessageId is int menuMessageId)
+                _menuKeyboardMessages[chatId] = menuMessageId;
+            if (state.PrimaryMessageId is int primaryMessageId)
+            {
+                _screenCoordinator.TrackMessage(chatId, primaryMessageId);
+                _panelMessages[chatId] = primaryMessageId;
+                _statusMessages[chatId] = primaryMessageId;
+                _selectionMessages[chatId] = primaryMessageId;
+                _managementMessages[chatId] = primaryMessageId;
+                _instanceMessages[chatId] = primaryMessageId;
+                _screenStates.GetOrAdd(chatId, _ => new ControlScreenState()).TrackPrimaryMessage(primaryMessageId);
+                Helpers.Logger.Info($"[CONTROL] restored primary message chat={chatId} message={primaryMessageId}");
+            }
+        }
     }
 
     public void Start()
@@ -283,7 +305,8 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private async Task<ControlMessageResult> EditScreenTransportAsync(long chatId, int messageId, ControlScreen screen, CancellationToken ct)
     {
-        SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
+        (SemaphoreSlim? gate, int cooldownDelay) = await TryAcquireScreenMessageLockAsync(chatId, ct);
+        if (gate == null) return new ControlMessageResult(ControlMessageOperation.RateLimited, RetryAfterSeconds: cooldownDelay);
         try
         {
             try
@@ -327,7 +350,8 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private async Task<ControlMessageResult> SendScreenTransportAsync(long chatId, ControlScreen screen, CancellationToken ct)
     {
-        SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
+        (SemaphoreSlim? gate, int cooldownDelay) = await TryAcquireScreenMessageLockAsync(chatId, ct);
+        if (gate == null) return new ControlMessageResult(ControlMessageOperation.RateLimited, RetryAfterSeconds: cooldownDelay);
         try
         {
             try
@@ -341,6 +365,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
                 _instanceMessages[chatId] = sent.MessageId;
                 _controlRenderKeys[chatId] = screen.RenderKey;
                 var state = _screenStates.GetOrAdd(chatId, _ => new ControlScreenState()); state.TrackPrimaryMessage(sent.MessageId);
+                _controlStateStore.SetPrimaryMessage(chatId, sent.MessageId);
                 Helpers.Logger.Info($"[CONTROL] primary message created chat={chatId} message={sent.MessageId} screen={screen.Name} revision={screen.Revision}");
                 return new ControlMessageResult(ControlMessageOperation.Applied, sent.MessageId);
             }
@@ -432,6 +457,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
                 {
                     Message menuMessage = await _bot.SendMessage(chatId, "🎛 Menu", replyMarkup: MainReplyKeyboard(), cancellationToken: ct);
                     _menuKeyboardMessages[chatId] = menuMessage.MessageId;
+                    _controlStateStore.SetMenuKeyboardMessage(chatId, menuMessage.MessageId);
                     _lastMessageOperation[chatId] = DateTimeOffset.UtcNow;
                 }
                 catch (ApiRequestException ex) when (ex.ErrorCode == 429)
@@ -1206,6 +1232,18 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         }
     }
 
+    private async Task<(SemaphoreSlim? Gate, int RetryAfterSeconds)> TryAcquireScreenMessageLockAsync(long chatId, CancellationToken ct)
+    {
+        SemaphoreSlim gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        TimeSpan delay = GetMessageApiDelay(chatId);
+        if (delay <= TimeSpan.Zero) return (gate, 0);
+
+        gate.Release();
+        int seconds = Math.Max(1, (int)Math.Ceiling(delay.TotalSeconds));
+        return (null, seconds);
+    }
+
     private async Task<bool> TryAcquireMessageApiLockAsync(long chatId, SemaphoreSlim gate, CancellationToken ct)
     {
         if (GetMessageApiDelay(chatId) > TimeSpan.Zero || !await gate.WaitAsync(0, ct)) return false;
@@ -1232,6 +1270,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     {
         DateTimeOffset until = DateTimeOffset.UtcNow.AddSeconds(Math.Max(retryAfterSeconds, 1));
         _rateLimitedUntil.AddOrUpdate(chatId, until, (_, existing) => existing > until ? existing : until);
+        _controlStateStore.SetRateLimitedUntil(chatId, until);
     }
 
     private static bool IsMessageNotModified(ApiRequestException ex) => ex.ErrorCode == 400 && ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase);

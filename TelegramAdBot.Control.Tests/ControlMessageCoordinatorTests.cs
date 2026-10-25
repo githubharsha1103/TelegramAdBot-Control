@@ -76,6 +76,29 @@ public sealed class ControlMessageCoordinatorTests
     }
 
     [Fact]
+    public async Task NewestScreenWinsAfterRateLimitedInitialSend()
+    {
+        var fake = new FakeTelegram { RateLimitFirstSend = true };
+        var delayEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDelay = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = fake.CreateCoordinator(async (_, ct) =>
+        {
+            delayEntered.TrySetResult();
+            await releaseDelay.Task.WaitAsync(ct);
+        });
+
+        coordinator.Enqueue(1, "dashboard", "Dashboard", InlineKeyboardMarkup.Empty());
+        await delayEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        coordinator.Enqueue(1, "promotion-workflow", "Promotion", InlineKeyboardMarkup.Empty());
+        releaseDelay.TrySetResult();
+        await Eventually(() => fake.LastText == "Promotion");
+
+        Assert.Equal(new[] { "Dashboard", "Promotion" }, fake.SentTexts);
+        Assert.Equal(2, fake.Sends);
+        Assert.Equal(101, coordinator.GetMessageId(1));
+    }
+
+    [Fact]
     public async Task RepeatedRateLimitsDoNotAbandonLatestScreen()
     {
         var fake = new FakeTelegram { RateLimitEdits = 5 };
@@ -179,12 +202,14 @@ public sealed class ControlMessageCoordinatorTests
     private sealed class FakeTelegram
     {
         public readonly List<(int MessageId, string Text)> Edits = new();
+        public readonly List<string> SentTexts = new();
         public readonly TaskCompletionSource FirstEditEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource ReleaseFirstEdit = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Sends;
         public string LastText = "";
         public bool BlockFirstEdit;
         public bool RateLimitFirstEdit;
+        public bool RateLimitFirstSend;
         public int RateLimitEdits;
         public bool DeleteFirstMessage;
         public bool FailFirstEdit;
@@ -193,7 +218,11 @@ public sealed class ControlMessageCoordinatorTests
 
         private Task<ControlMessageResult> Send(long chatId, ControlScreen screen, CancellationToken ct)
         {
-            int id = Interlocked.Add(ref Sends, 1) == 1 ? 100 : 101;
+            int sendNumber = Interlocked.Increment(ref Sends);
+            SentTexts.Add(screen.Text);
+            if (RateLimitFirstSend && sendNumber == 1)
+                return Task.FromResult(new ControlMessageResult(ControlMessageOperation.RateLimited, RetryAfterSeconds: 2807));
+            int id = sendNumber == 1 ? 100 : 101;
             LastText = screen.Text;
             return Task.FromResult(new ControlMessageResult(ControlMessageOperation.Applied, id));
         }
