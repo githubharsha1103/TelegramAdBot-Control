@@ -14,14 +14,14 @@ public sealed class TelegramRetryAfterTests
     }
 
     [Fact]
-    public void ParsesRetryAfterFromTelegramErrorMessageWhenStructuredValueIsMissing()
+    public void ParsesRetryAfterFromApiErrorMessage()
     {
         var exception = new ApiRequestException("Too Many Requests: retry after 45", 429);
         Assert.Equal(45, TelegramRetryAfter.Parse(exception));
     }
 
     [Fact]
-    public void UsesConservativeCooldownWhenRetryAfterIsMissing()
+    public void UsesConservativeDelayWhenTelegramOmitsRetryAfter()
     {
         var exception = new ApiRequestException("Too Many Requests", 429);
         Assert.Equal(3600, TelegramRetryAfter.Parse(exception));
