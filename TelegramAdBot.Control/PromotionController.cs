@@ -27,6 +27,7 @@ public sealed class PromotionController
     private int _currentAccount = 1;
     private string _accountState = "Idle";
     private int _currentSelectedAccountIndex;
+    private PromotionRunState _runState = PromotionRunState.Idle;
 
     public PromotionController(BotConfig config, BotConfigManager? botConfig = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _manualInstances = new ManualInstanceManager(config); }
 
@@ -126,6 +127,7 @@ public sealed class PromotionController
             _currentAccount = 1;
             _currentSelectedAccountIndex = 0;
             _accountState = "Preparing first account";
+            _runState = PromotionRunState.Idle;
             _instanceProgress.Clear();
             foreach (int instanceId in selectedInstances)
                 _instanceProgress[instanceId] = new InstanceAccountProgress(0, 1, "Waiting");
@@ -157,6 +159,7 @@ public sealed class PromotionController
             var failedBrowserIds = await _manager.OpenSelectedBrowsersAsync();
             if (failedBrowserIds.Count > 0)
             {
+                _runState = PromotionRunState.Failed;
                 string error = "Browser preparation failed for instances: [" + string.Join(",", failedBrowserIds) + "].";
                 foreach (int instanceId in failedBrowserIds) SetInstanceProgress(instanceId, 0, 1, "Failed", error);
                 SetLastError(error);
@@ -174,6 +177,7 @@ public sealed class PromotionController
                 engine.SetSelectedAccountIndex(0);
                 if (!await engine.PrepareFirstAccountAsync(firstAccount))
                 {
+                    _runState = PromotionRunState.Failed;
                     string error = $"Instance {instanceId} Account {firstAccount} preparation/initialization failed.";
                     SetInstanceProgress(instanceId, 0, 1, "Failed", error);
                     SetLastError(error);
@@ -185,6 +189,7 @@ public sealed class PromotionController
             var failedStartIds = await _manager.StartSelectedAsync();
             if (failedStartIds.Count > 0)
             {
+                _runState = PromotionRunState.Failed;
                 string error = "Promotion engine failed to start for instances: [" + string.Join(",", failedStartIds) + "].";
                 foreach (var engine in _manager.Engines.Where(engine => failedStartIds.Contains(engine.InstanceId))) SetInstanceProgress(engine.InstanceId, 0, _run.AccountsByInstance[engine.InstanceId][0], "Failed", error);
                 SetLastError(error);
@@ -198,10 +203,12 @@ public sealed class PromotionController
             }
             if (_run.SelectedInstanceIds.Count == 1) _accountState = $"Account {_run.AccountsByInstance[_run.SelectedInstanceIds[0]][0]} promotion running...";
             else _accountState = "Per-instance account workflows running";
+            _runState = PromotionRunState.Running;
             return Ok("Promotion started.");
         }
         catch (Exception ex)
         {
+            _runState = PromotionRunState.Failed;
             SetLastError(ex.Message);
             Logger.Error("[CONTROL] START failed: " + ex.Message);
             return Fail("Start failed: " + ex.Message);
@@ -229,6 +236,7 @@ public sealed class PromotionController
                 SetInstanceProgress(instanceId, progress.SelectedAccountIndex, progress.CurrentAccount, "Failed", error);
                 SetLastError(error);
                 Logger.Error("[CONTROL] " + error);
+                _runState = PromotionRunState.Failed;
                 return false;
             }
             SetInstanceProgress(instanceId, nextIndex, next, $"Initializing Account {next}...");
@@ -244,6 +252,7 @@ public sealed class PromotionController
         }
         catch (Exception ex)
         {
+            _runState = PromotionRunState.Failed;
             _manager?.GetInstance(instanceId)?.RetainBrowserAfterAccountFailure();
             string error = $"Instance {instanceId} account switch/initialization to Account {next} failed: {ex.Message}";
             SetInstanceProgress(instanceId, nextIndex, next, "Failed", error);
@@ -261,6 +270,7 @@ public sealed class PromotionController
         if (manager.Engines.All(x => x.IsPaused)) return Task.FromResult(Fail("Promotion is already paused."));
         Logger.Info("[CONTROL] PAUSE requested.");
         manager.PauseAll();
+        _runState = PromotionRunState.Paused;
         return Task.FromResult(Ok("Promotion paused."));
     }
 
@@ -272,6 +282,7 @@ public sealed class PromotionController
         if (manager.Engines.All(x => !x.IsPaused)) return Task.FromResult(Fail("Promotion is not paused."));
         Logger.Info("[CONTROL] RESUME requested.");
         manager.ResumeSequential();
+        _runState = PromotionRunState.Running;
         return Task.FromResult(Ok("Promotion resumed."));
     }
 
@@ -282,13 +293,15 @@ public sealed class PromotionController
         {
             if (_manager == null || (!_manager.HasBrowserResources && !_manager.AnyRunning)) return Fail("Promotion is already stopped.");
             _isStopping = true;
+            _runState = PromotionRunState.Stopping;
             Logger.Info("[CONTROL] STOP requested.");
             await _manager.CleanupAsync();
             if (_manager.HasBrowserResources || _manager.AnyBrowserAlive)
                 throw new InvalidOperationException("Browser resources remain after cleanup verification.");
+            _runState = PromotionRunState.Stopped;
             return Ok("Promotion stopped.");
         }
-        catch (Exception ex) { _lastError = ex.Message; return Fail("Stop failed: " + ex.Message); }
+        catch (Exception ex) { _lastError = ex.Message; _runState = PromotionRunState.Failed; return Fail("Stop failed: " + ex.Message); }
         finally { _isStopping = false; _commandLock.Release(); }
     }
 
@@ -303,9 +316,15 @@ public sealed class PromotionController
         bool promotionStateActive = manager?.Engines.Any(engine => !engine.IsFinished &&
             _instanceProgress.TryGetValue(engine.InstanceId, out var progress) &&
             progress.State.Contains("promotion running", StringComparison.OrdinalIgnoreCase)) == true;
+        if (_isStopping) _runState = PromotionRunState.Stopping;
+        else if (_runState == PromotionRunState.Running && manager != null && manager.AllFinished)
+            _runState = manager.Engines.Any(engine => engine.HasFailed) || _instanceProgress.Values.Any(progress => progress.State == "Failed")
+                ? PromotionRunState.Failed : PromotionRunState.Completed;
+        else if (_runState == PromotionRunState.Running && manager?.IsPaused == true) _runState = PromotionRunState.Paused;
         var firstProgress = selectedIds.Count > 0 && _instanceProgress.TryGetValue(selectedIds[0], out var value) ? value : null;
         var status = new PromotionStatus
         {
+            RunState = _runState,
             IsConfigured = _run != null,
             IsRunning = manager?.AnyRunning == true || accountTransitionActive || promotionStateActive,
             IsStopping = _isStopping,

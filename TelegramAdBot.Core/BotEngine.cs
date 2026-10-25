@@ -25,6 +25,7 @@ public class BotEngine
 	private volatile bool _paused;
 
 	private volatile bool _finished;
+	private volatile bool _failed;
 	private IReadOnlyList<int> _selectedAccounts = new[] { 1 };
 	private int _selectedAccountIndex;
 	private int _currentAccount = 1;
@@ -53,6 +54,7 @@ public class BotEngine
 	public bool IsPaused => _paused;
 
 	public bool IsFinished => _finished;
+	public bool HasFailed => _failed;
 
 	public bool IsBrowserAlive => _controller?.IsBrowserOpen() ?? false;
 	public bool HasBrowserResources => _controller?.HasResources ?? false;
@@ -435,6 +437,7 @@ public class BotEngine
 		}
 		catch (Exception ex)
 		{
+			_failed = true;
 			Logger.Error("Fatal promotion loop error: " + ex.Message, _instanceId);
 			_finished = true;
 		}

@@ -6,6 +6,21 @@ namespace TelegramAdBot.Control.Tests;
 
 public sealed class PromotionControllerTests
 {
+    [Theory]
+    [InlineData(PromotionRunState.Idle)]
+    [InlineData(PromotionRunState.Running)]
+    [InlineData(PromotionRunState.Paused)]
+    [InlineData(PromotionRunState.Stopping)]
+    [InlineData(PromotionRunState.Stopped)]
+    [InlineData(PromotionRunState.Completed)]
+    [InlineData(PromotionRunState.Failed)]
+    public void PromotionStatus_PreservesAuthoritativeRunState(PromotionRunState state)
+    {
+        var status = new PromotionStatus { RunState = state, CompletedCycles = 100, TotalCycles = 100 };
+
+        Assert.Equal(state, status.RunState);
+    }
+
     [Fact]
     public async Task ConfigureAsync_ExposesOnlyExplicitSelectedIdsAndPreservesPerInstanceAccounts()
     {
@@ -37,6 +52,9 @@ public sealed class PromotionControllerTests
             Assert.Equal(new[] { 2, 11 }, status.SelectedInstanceIds);
             Assert.Equal(new[] { 1, 3 }, status.AccountsByInstance[2]);
             Assert.Equal(new[] { 2 }, status.AccountsByInstance[11]);
+            Assert.Equal(2, status.InstanceCount);
+            Assert.Equal(7, status.CyclesPerBot);
+            Assert.Equal(PromotionRunState.Idle, status.RunState);
             Assert.DoesNotContain(1, status.SelectedInstanceIds);
             Assert.DoesNotContain(3, status.SelectedInstanceIds);
         }

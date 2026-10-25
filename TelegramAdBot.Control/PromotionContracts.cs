@@ -4,6 +4,8 @@ using TelegramAdBot.Models;
 
 namespace TelegramAdBot.Control;
 
+public enum PromotionRunState { Idle, Running, Paused, Stopping, Stopped, Completed, Failed }
+
 public sealed class PromotionRunConfiguration
 {
     public int MaxSupportedInstanceCount { get; set; } = int.MaxValue;
@@ -18,6 +20,7 @@ public sealed class PromotionRunConfiguration
 
 public sealed class PromotionStatus
 {
+    public PromotionRunState RunState { get; set; } = PromotionRunState.Idle;
     public int MaxSupportedInstanceCount { get; set; } = int.MaxValue;
     public bool IsRunning { get; set; }
     public bool IsPaused { get; set; }
