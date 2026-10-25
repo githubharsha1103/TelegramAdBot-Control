@@ -38,6 +38,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     private readonly ConcurrentDictionary<long, string> _currentScreens = new();
     private readonly ConcurrentDictionary<long, ControlScreenState> _screenStates = new();
     private readonly ConcurrentDictionary<long, int> _menuKeyboardMessages = new();
+    private readonly ConcurrentDictionary<long, byte> _menuKeyboardPending = new();
     private readonly ConcurrentDictionary<long, string> _panelCallbackTokens = new();
     private readonly ConcurrentDictionary<long, int> _selectionMessages = new();
     private readonly ConcurrentDictionary<long, int> _managementMessages = new();
@@ -281,11 +282,9 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private async Task<ControlMessageResult> EditScreenTransportAsync(long chatId, int messageId, ControlScreen screen, CancellationToken ct)
     {
-        SemaphoreSlim gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
         try
         {
-            await WaitForMessageRateLimitAsync(chatId, ct);
             try
             {
                 await _bot.EditMessageText(chatId, messageId, screen.Text, replyMarkup: screen.Keyboard, cancellationToken: ct);
@@ -302,7 +301,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             catch (ApiRequestException ex) when (ex.ErrorCode == 429)
             {
                 int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
-                _rateLimitedUntil[chatId] = DateTimeOffset.UtcNow.AddSeconds(retryAfter);
+                SetRateLimit(chatId, retryAfter);
                 Helpers.Logger.Warning($"[CONTROL] render rate limited chat={chatId} message={messageId} screen={screen.Name} retry_after={retryAfter}s");
                 return new ControlMessageResult(ControlMessageOperation.RateLimited, RetryAfterSeconds: retryAfter);
             }
@@ -327,11 +326,9 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private async Task<ControlMessageResult> SendScreenTransportAsync(long chatId, ControlScreen screen, CancellationToken ct)
     {
-        SemaphoreSlim gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
         try
         {
-            await WaitForMessageRateLimitAsync(chatId, ct);
             try
             {
                 Message sent = await _bot.SendMessage(chatId, screen.Text, replyMarkup: screen.Keyboard, cancellationToken: ct);
@@ -349,7 +346,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             catch (ApiRequestException ex) when (ex.ErrorCode == 429)
             {
                 int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
-                _rateLimitedUntil[chatId] = DateTimeOffset.UtcNow.AddSeconds(retryAfter);
+                SetRateLimit(chatId, retryAfter);
                 Helpers.Logger.Warning($"[CONTROL] screen send rate limited chat={chatId} screen={screen.Name} retry_after={retryAfter}s");
                 return new ControlMessageResult(ControlMessageOperation.RateLimited, RetryAfterSeconds: retryAfter);
             }
@@ -419,10 +416,15 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     private async Task SendMenuKeyboardAsync(long chatId, CancellationToken ct)
     {
         var gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        if (!await TryAcquireMessageApiLockAsync(chatId, gate, ct))
+        {
+            if (_menuKeyboardPending.TryAdd(chatId, 0))
+                _ = Task.Run(() => SendMenuKeyboardAfterCooldownAsync(chatId, ct), CancellationToken.None);
+            Helpers.Logger.Info($"[CONTROL] reply-keyboard send deferred during cooldown or active message operation chat={chatId}");
+            return;
+        }
         try
         {
-            await WaitForMessageRateLimitAsync(chatId, ct);
             try
             {
                 Message menuMessage = await _bot.SendMessage(chatId, "🎛 Menu", replyMarkup: MainReplyKeyboard(), cancellationToken: ct);
@@ -437,13 +439,36 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             catch (ApiRequestException ex) when (ex.ErrorCode == 429)
             {
                 int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
-                _rateLimitedUntil[chatId] = DateTimeOffset.UtcNow.AddSeconds(retryAfter);
+                SetRateLimit(chatId, retryAfter);
                 Helpers.Logger.Warning($"[CONTROL] reply-keyboard send rate limited chat={chatId} retry_after={retryAfter}s");
             }
             catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Reply keyboard send failed: " + ex.Message); }
             finally { _lastMessageOperation[chatId] = DateTimeOffset.UtcNow; }
         }
         finally { gate.Release(); }
+    }
+
+    private async Task SendMenuKeyboardAfterCooldownAsync(long chatId, CancellationToken ct)
+    {
+        try
+        {
+            SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
+            try
+            {
+                Message menuMessage = await _bot.SendMessage(chatId, "🎛 Menu", replyMarkup: MainReplyKeyboard(), cancellationToken: ct);
+                _menuKeyboardMessages[chatId] = menuMessage.MessageId;
+                _lastMessageOperation[chatId] = DateTimeOffset.UtcNow;
+            }
+            catch (ApiRequestException ex) when (ex.ErrorCode == 429)
+            {
+                int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
+                SetRateLimit(chatId, retryAfter);
+                if (!ct.IsCancellationRequested) _ = Task.Run(() => SendMenuKeyboardAsync(chatId, ct), CancellationToken.None);
+            }
+            finally { gate.Release(); }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        finally { _menuKeyboardPending.TryRemove(chatId, out _); }
     }
 
     private async Task BeginAsync(long chatId, CancellationToken ct)
@@ -1159,22 +1184,20 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private async Task<Message> SafeSendAsync(long chatId, string text, InlineKeyboardMarkup keyboard, CancellationToken ct, string actionName = "message-send")
     {
-        if (_rateLimitedUntil.TryGetValue(chatId, out DateTimeOffset blockedUntil) && blockedUntil > DateTimeOffset.UtcNow)
+        var gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
+        if (!await TryAcquireMessageApiLockAsync(chatId, gate, ct))
         {
-            Helpers.Logger.Info($"[CONTROL] non-screen send skipped during Telegram cooldown chat={chatId} action={actionName}");
+            Helpers.Logger.Info($"[CONTROL] non-screen send skipped during Telegram cooldown or active message operation chat={chatId} action={actionName}");
             return null;
         }
-        var gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
         try
         {
-            await WaitForMessageRateLimitAsync(chatId, ct);
             try { return await _bot.SendMessage(chatId, text, replyMarkup: keyboard == null ? null : keyboard.InlineKeyboard.Any() ? keyboard : MainReplyKeyboard(), cancellationToken: ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (ApiRequestException ex) when (ex.ErrorCode == 429)
             {
                 int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
-                _rateLimitedUntil[chatId] = DateTimeOffset.UtcNow.AddSeconds(retryAfter);
+                SetRateLimit(chatId, retryAfter);
                 Helpers.Logger.Warning($"[CONTROL] Telegram rate limited send: chat_id={chatId} retry_after={retryAfter}s action={actionName}");
                 return null;
             }
@@ -1184,19 +1207,46 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         finally { gate.Release(); }
     }
 
-    private async Task WaitForMessageRateLimitAsync(long chatId, CancellationToken ct)
+    private async Task<SemaphoreSlim> AcquireMessageApiLockAsync(long chatId, CancellationToken ct)
     {
-        if (_rateLimitedUntil.TryGetValue(chatId, out DateTimeOffset blockedUntil))
+        SemaphoreSlim gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
+        while (true)
         {
-            TimeSpan cooldown = blockedUntil - DateTimeOffset.UtcNow;
-            if (cooldown > TimeSpan.Zero) await Task.Delay(cooldown, ct);
-            else _rateLimitedUntil.TryRemove(chatId, out _);
+            TimeSpan delay = GetMessageApiDelay(chatId);
+            if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
+            await gate.WaitAsync(ct);
+            delay = GetMessageApiDelay(chatId);
+            if (delay <= TimeSpan.Zero) return gate;
+            gate.Release();
         }
+    }
+
+    private async Task<bool> TryAcquireMessageApiLockAsync(long chatId, SemaphoreSlim gate, CancellationToken ct)
+    {
+        if (GetMessageApiDelay(chatId) > TimeSpan.Zero || !await gate.WaitAsync(0, ct)) return false;
+        if (GetMessageApiDelay(chatId) <= TimeSpan.Zero) return true;
+        gate.Release();
+        return false;
+    }
+
+    private TimeSpan GetMessageApiDelay(long chatId)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        TimeSpan remaining = TimeSpan.Zero;
+        if (_rateLimitedUntil.TryGetValue(chatId, out DateTimeOffset blockedUntil) && blockedUntil > now)
+            remaining = blockedUntil - now;
         if (_lastMessageOperation.TryGetValue(chatId, out DateTimeOffset last))
         {
-            TimeSpan remaining = TimeSpan.FromSeconds(1) - (DateTimeOffset.UtcNow - last);
-            if (remaining > TimeSpan.Zero) await Task.Delay(remaining, ct);
+            TimeSpan spacing = TimeSpan.FromSeconds(1) - (now - last);
+            if (spacing > remaining) remaining = spacing;
         }
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
+
+    private void SetRateLimit(long chatId, int retryAfterSeconds)
+    {
+        DateTimeOffset until = DateTimeOffset.UtcNow.AddSeconds(Math.Max(retryAfterSeconds, 1));
+        _rateLimitedUntil.AddOrUpdate(chatId, until, (_, existing) => existing > until ? existing : until);
     }
 
     private static bool IsMessageNotModified(ApiRequestException ex) => ex.ErrorCode == 400 && ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase);

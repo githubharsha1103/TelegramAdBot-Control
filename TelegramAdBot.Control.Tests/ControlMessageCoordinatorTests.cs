@@ -62,6 +62,56 @@ public sealed class ControlMessageCoordinatorTests
     }
 
     [Fact]
+    public async Task LongCooldownIsPassedThroughWithoutShortening()
+    {
+        var fake = new FakeTelegram { RateLimitEdits = 1 };
+        int requestedDelay = 0;
+        var coordinator = fake.CreateCoordinator((seconds, _) => { requestedDelay = seconds; return Task.CompletedTask; });
+        coordinator.Enqueue(1, "dashboard", "Dashboard", InlineKeyboardMarkup.Empty());
+        await Eventually(() => coordinator.GetMessageId(1) == 100);
+        coordinator.Enqueue(1, "instances", "Instances", InlineKeyboardMarkup.Empty());
+        await Eventually(() => fake.LastText == "Instances");
+        Assert.Equal(900, requestedDelay);
+        Assert.Equal(2, fake.Edits.Count);
+    }
+
+    [Fact]
+    public async Task RepeatedRateLimitsDoNotAbandonLatestScreen()
+    {
+        var fake = new FakeTelegram { RateLimitEdits = 5 };
+        var coordinator = fake.CreateCoordinator((_, _) => Task.CompletedTask);
+        coordinator.Enqueue(1, "dashboard", "Dashboard", InlineKeyboardMarkup.Empty());
+        await Eventually(() => coordinator.GetMessageId(1) == 100);
+        coordinator.Enqueue(1, "instances", "Instances", InlineKeyboardMarkup.Empty());
+        await Eventually(() => fake.LastText == "Instances");
+        Assert.Equal(6, fake.Edits.Count);
+        Assert.Equal("Instances", fake.Edits.Last().Text);
+        Assert.Null(coordinator.GetDesiredRevision(1));
+    }
+
+    [Fact]
+    public async Task CancellationLeavesWorkerRecoverableByNewRequest()
+    {
+        var fake = new FakeTelegram { RateLimitEdits = 1 };
+        var delayEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = fake.CreateCoordinator(async (_, ct) =>
+        {
+            delayEntered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        });
+        coordinator.Enqueue(1, "dashboard", "Dashboard", InlineKeyboardMarkup.Empty());
+        await Eventually(() => coordinator.GetMessageId(1) == 100);
+        using var cancel = new CancellationTokenSource();
+        coordinator.Enqueue(1, "instances", "Instances", InlineKeyboardMarkup.Empty(), cancel.Token);
+        await delayEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancel.Cancel();
+        coordinator.Enqueue(1, "help", "Help", InlineKeyboardMarkup.Empty());
+        await Eventually(() => fake.LastText == "Help");
+        Assert.Equal("Help", fake.Edits.Last().Text);
+        Assert.Null(coordinator.GetDesiredRevision(1));
+    }
+
+    [Fact]
     public async Task DeletedMessageCreatesOnlyOneReplacement()
     {
         var fake = new FakeTelegram { DeleteFirstMessage = true };
@@ -135,6 +185,7 @@ public sealed class ControlMessageCoordinatorTests
         public string LastText = "";
         public bool BlockFirstEdit;
         public bool RateLimitFirstEdit;
+        public int RateLimitEdits;
         public bool DeleteFirstMessage;
         public bool FailFirstEdit;
 
@@ -149,6 +200,13 @@ public sealed class ControlMessageCoordinatorTests
 
         private async Task<ControlMessageResult> Edit(long chatId, int messageId, ControlScreen screen, CancellationToken ct)
         {
+            if (RateLimitEdits > 0)
+            {
+                RateLimitEdits--;
+                Edits.Add((messageId, screen.Text));
+                if (Edits.Count == 1) FirstEditEntered.TrySetResult();
+                return new ControlMessageResult(ControlMessageOperation.RateLimited, RetryAfterSeconds: 900);
+            }
             if (FailFirstEdit && Edits.Count == 0)
             {
                 Edits.Add((messageId, screen.Text));

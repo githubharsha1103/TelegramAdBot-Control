@@ -22,6 +22,7 @@ public sealed class ControlMessageCoordinator
         public ControlScreen? Desired;
         public long Revision;
         public bool WorkerRunning;
+        public CancellationToken DesiredToken;
     }
 
     private readonly ConcurrentDictionary<long, ChatState> _chats = new();
@@ -60,6 +61,7 @@ public sealed class ControlMessageCoordinator
             string key = text + "\n--KEYBOARD--\n" + string.Join("|", keyboard.InlineKeyboard.SelectMany(row => row).Select(button => button.CallbackData + "=" + button.Text));
             if (key == state.RenderKey && state.MessageId.HasValue && state.Desired == null) return revision;
             state.Desired = new ControlScreen(screen, text, keyboard, key, revision);
+            state.DesiredToken = cancellationToken;
             _log?.Invoke($"render queued chat={chatId} screen={screen} revision={revision} message={state.MessageId?.ToString() ?? "new"}");
             if (!state.WorkerRunning)
             {
@@ -72,7 +74,6 @@ public sealed class ControlMessageCoordinator
 
     private async Task RunWorkerAsync(long chatId, ChatState state, CancellationToken ct)
     {
-        int rateLimitAttempts = 0;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -88,18 +89,11 @@ public sealed class ControlMessageCoordinator
 
                 if (result.Operation == ControlMessageOperation.RateLimited)
                 {
-                    if (++rateLimitAttempts > 3)
-                    {
-                        _log?.Invoke($"render abandoned after repeated 429 chat={chatId} message={messageId} revision={screen.Revision}");
-                        lock (state.Sync) if (state.Desired?.Revision == screen.Revision) state.Desired = null;
-                        return;
-                    }
                     int delay = Math.Max(result.RetryAfterSeconds, 1);
                     _log?.Invoke($"render delayed chat={chatId} message={messageId} retry_after={delay}s revision={screen.Revision}");
                     await _delay(delay, ct);
                     continue;
                 }
-                rateLimitAttempts = 0;
                 if (result.Operation == ControlMessageOperation.Missing && messageId.HasValue)
                 {
                     lock (state.Sync)
@@ -140,10 +134,15 @@ public sealed class ControlMessageCoordinator
             lock (state.Sync)
             {
                 state.WorkerRunning = false;
-                restart = state.Desired != null && !ct.IsCancellationRequested;
+                restart = state.Desired != null && !state.DesiredToken.IsCancellationRequested;
                 if (restart) state.WorkerRunning = true;
             }
-            if (restart) _ = Task.Run(() => RunWorkerAsync(chatId, state, ct), CancellationToken.None);
+            if (restart)
+            {
+                CancellationToken latestToken;
+                lock (state.Sync) latestToken = state.DesiredToken;
+                _ = Task.Run(() => RunWorkerAsync(chatId, state, latestToken), CancellationToken.None);
+            }
         }
     }
 }
