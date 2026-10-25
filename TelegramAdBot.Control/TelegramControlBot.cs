@@ -48,7 +48,6 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     private readonly ConcurrentDictionary<long, HashSet<int>> _instanceSelections = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _chatLocks = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _dashboardLocks = new();
-    private readonly ConcurrentDictionary<long, SemaphoreSlim> _menuLocks = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _startGates = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _configureGates = new();
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _browserActionLocks = new();
@@ -107,7 +106,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         Helpers.Logger.Success("[CONTROL] Integrated Telegram control bot started.");
     }
 
-    private async Task HandleUpdateAsync(ITelegramBotClient _, Update update, CancellationToken ct)
+    private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken ct)
     {
         try
         {
@@ -121,9 +120,8 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         if (!chatId.HasValue) return;
         if (update.CallbackQuery is { } callback)
         {
-            Helpers.Logger.Info($"[CONTROL] update received type=callback category={(callback.Data?.Split(':').FirstOrDefault() ?? "unknown")}");
-            try { await _bot.AnswerCallbackQuery(callback.Id, cancellationToken: ct); }
-            catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Callback acknowledgement failed: " + ex.Message); }
+            Helpers.Logger.Info($"[CONTROL] update received type=callback category={(callback.Data?.Split(':').FirstOrDefault() ?? "unknown")} message_id={callback.Message?.MessageId.ToString() ?? "none"}");
+            _ = AcknowledgeCallbackAsync(callback.Id, ct);
             await CallbackAsync(chatId.Value, callback.Message?.MessageId, callback.Data ?? "", ct);
             return;
         }
@@ -200,6 +198,12 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Update handling failed safely: " + ex.Message); }
     }
 
+    private async Task AcknowledgeCallbackAsync(string callbackId, CancellationToken ct)
+    {
+        try { await _bot.AnswerCallbackQuery(callbackId, cancellationToken: ct); }
+        catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Callback acknowledgement failed: " + ex.Message); }
+    }
+
     private static string RecognizeNavigationAction(string text)
     {
         if (text.Contains("Dashboard", StringComparison.OrdinalIgnoreCase) || text.StartsWith('/')) return "command-or-dashboard";
@@ -220,10 +224,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private async Task MainMenuAsync(long chatId, CancellationToken ct)
     {
-        var gate = _menuLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
-        try { if (!_menuKeyboardMessages.ContainsKey(chatId)) await SendMenuKeyboardAsync(chatId, ct); }
-        finally { gate.Release(); }
+        if (!_menuKeyboardMessages.ContainsKey(chatId)) QueueMenuKeyboardSend(chatId, ct);
         await RenderDashboardAsync(chatId, ct);
     }
 
@@ -413,59 +414,43 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         new[] { InlineKeyboardButton.WithCallbackData("📊 Activity", TaggedCallback("panel", token, "status")), InlineKeyboardButton.WithCallbackData("🏠 Dashboard", TaggedCallback("panel", token, "refresh")) }
     });
 
-    private async Task SendMenuKeyboardAsync(long chatId, CancellationToken ct)
+    private void QueueMenuKeyboardSend(long chatId, CancellationToken ct)
     {
-        var gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        if (!await TryAcquireMessageApiLockAsync(chatId, gate, ct))
-        {
-            if (_menuKeyboardPending.TryAdd(chatId, 0))
-                _ = Task.Run(() => SendMenuKeyboardAfterCooldownAsync(chatId, ct), CancellationToken.None);
-            Helpers.Logger.Info($"[CONTROL] reply-keyboard send deferred during cooldown or active message operation chat={chatId}");
-            return;
-        }
-        try
-        {
-            try
-            {
-                Message menuMessage = await _bot.SendMessage(chatId, "🎛 Menu", replyMarkup: MainReplyKeyboard(), cancellationToken: ct);
-                if (_menuKeyboardMessages.TryGetValue(chatId, out int previousMenuMessageId))
-                {
-                    try { await _bot.DeleteMessage(chatId, previousMenuMessageId, ct); }
-                    catch (Exception ex) { Helpers.Logger.Info("[CONTROL] Previous menu message cleanup skipped: " + ex.Message); }
-                }
-                _menuKeyboardMessages[chatId] = menuMessage.MessageId;
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (ApiRequestException ex) when (ex.ErrorCode == 429)
-            {
-                int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
-                SetRateLimit(chatId, retryAfter);
-                Helpers.Logger.Warning($"[CONTROL] reply-keyboard send rate limited chat={chatId} retry_after={retryAfter}s");
-            }
-            catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Reply keyboard send failed: " + ex.Message); }
-            finally { _lastMessageOperation[chatId] = DateTimeOffset.UtcNow; }
-        }
-        finally { gate.Release(); }
+        if (_menuKeyboardMessages.ContainsKey(chatId) || !_menuKeyboardPending.TryAdd(chatId, 0)) return;
+        _ = Task.Run(() => SendMenuKeyboardAfterCooldownAsync(chatId, ct), CancellationToken.None);
     }
 
     private async Task SendMenuKeyboardAfterCooldownAsync(long chatId, CancellationToken ct)
     {
         try
         {
-            SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
-            try
+            while (!ct.IsCancellationRequested && !_menuKeyboardMessages.ContainsKey(chatId))
             {
-                Message menuMessage = await _bot.SendMessage(chatId, "🎛 Menu", replyMarkup: MainReplyKeyboard(), cancellationToken: ct);
-                _menuKeyboardMessages[chatId] = menuMessage.MessageId;
-                _lastMessageOperation[chatId] = DateTimeOffset.UtcNow;
+                SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
+                bool retryAfterCooldown = false;
+                try
+                {
+                    Message menuMessage = await _bot.SendMessage(chatId, "🎛 Menu", replyMarkup: MainReplyKeyboard(), cancellationToken: ct);
+                    _menuKeyboardMessages[chatId] = menuMessage.MessageId;
+                    _lastMessageOperation[chatId] = DateTimeOffset.UtcNow;
+                }
+                catch (ApiRequestException ex) when (ex.ErrorCode == 429)
+                {
+                    int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
+                    SetRateLimit(chatId, retryAfter);
+                    _lastMessageOperation[chatId] = DateTimeOffset.UtcNow;
+                    retryAfterCooldown = true;
+                    Helpers.Logger.Warning($"[CONTROL] reply-keyboard send rate limited chat={chatId} retry_after={retryAfter}s");
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    Helpers.Logger.Warning("[CONTROL] Reply keyboard send failed: " + ex.Message);
+                    return;
+                }
+                finally { gate.Release(); }
+                if (!retryAfterCooldown) return;
             }
-            catch (ApiRequestException ex) when (ex.ErrorCode == 429)
-            {
-                int retryAfter = Math.Max(ex.Parameters?.RetryAfter ?? 1, 1);
-                SetRateLimit(chatId, retryAfter);
-                if (!ct.IsCancellationRequested) _ = Task.Run(() => SendMenuKeyboardAsync(chatId, ct), CancellationToken.None);
-            }
-            finally { gate.Release(); }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         finally { _menuKeyboardPending.TryRemove(chatId, out _); }
