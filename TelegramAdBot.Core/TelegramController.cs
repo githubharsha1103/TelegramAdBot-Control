@@ -355,6 +355,62 @@ public class TelegramController : IAsyncDisposable
 		}
 	}
 
+	public static bool IsExpectedBotConversationUrl(string actualUrl, string telegramWebUrl, string botUsername)
+	{
+		if (string.IsNullOrWhiteSpace(actualUrl) || string.IsNullOrWhiteSpace(telegramWebUrl) || string.IsNullOrWhiteSpace(botUsername)) return false;
+		if (!Uri.TryCreate(actualUrl, UriKind.Absolute, out Uri? actual) || !Uri.TryCreate(telegramWebUrl, UriKind.Absolute, out Uri? webBase)) return false;
+		string expectedIdentifier = "@" + botUsername.Trim().TrimStart('@');
+		string actualIdentifier;
+		try { actualIdentifier = Uri.UnescapeDataString(actual.Fragment.TrimStart('#')); }
+		catch { return false; }
+		return string.Equals(actual.Scheme, webBase.Scheme, StringComparison.OrdinalIgnoreCase) &&
+			string.Equals(actual.Host, webBase.Host, StringComparison.OrdinalIgnoreCase) &&
+			actual.Port == webBase.Port &&
+			string.Equals(actual.AbsolutePath.TrimEnd('/'), webBase.AbsolutePath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase) &&
+			string.Equals(actualIdentifier, expectedIdentifier, StringComparison.OrdinalIgnoreCase);
+	}
+
+	public async Task<bool> VerifyExpectedBotConversationAsync(string botUsername, bool requireMessageInput)
+	{
+		string actualUrl = _page == null || _page.IsClosed ? "<unavailable>" : _page.Url;
+		string expectedUrl = BuildExpectedBotConversationUrl(botUsername);
+		Logger.Info($"[Recovery] URL verification started. Expected={expectedUrl}; Actual={actualUrl}", _instanceId);
+		bool matches = IsExpectedBotConversationUrl(actualUrl, _config.TelegramWebUrl, botUsername);
+		if (!matches)
+		{
+			Logger.Warning($"[Recovery] Conversation URL mismatch. Expected={expectedUrl}; Actual={actualUrl}", _instanceId);
+			return false;
+		}
+
+		if (requireMessageInput)
+		{
+			try
+			{
+				if (_page == null || _page.IsClosed) return false;
+				await _page.Locator(".input-message-input[contenteditable='true']").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+			}
+			catch (Exception ex)
+			{
+				Logger.Warning($"[Recovery] Expected conversation URL matched but message input is unavailable: {ex.Message}", _instanceId);
+				return false;
+			}
+		}
+
+		Logger.Success($"[Recovery] Conversation verified successfully: {expectedUrl}", _instanceId);
+		return true;
+	}
+
+	public async Task CaptureRecoveryFailureAsync(string reason)
+	{
+		await BrowserDiagnosticAsync("Conversation recovery failed: " + reason, "recovery-failure", screenshot: true);
+	}
+
+	private string BuildExpectedBotConversationUrl(string botUsername)
+	{
+		if (!Uri.TryCreate(_config.TelegramWebUrl, UriKind.Absolute, out Uri? webBase)) return "<invalid TelegramWebUrl>";
+		return webBase.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/#@" + botUsername.Trim().TrimStart('@');
+	}
+
 	public async Task<bool> DismissReplyKeyboardAsync()
 	{
 		try

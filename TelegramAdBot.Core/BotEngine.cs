@@ -24,6 +24,8 @@ public class BotEngine
 
 	private volatile bool _paused;
 
+	private volatile bool _recoveryBlocked;
+
 	private volatile bool _finished;
 	private volatile bool _failed;
 	private IReadOnlyList<int> _selectedAccounts = new[] { 1 };
@@ -218,6 +220,11 @@ public class BotEngine
 		}
 		if (_running && _paused)
 		{
+			if (_recoveryBlocked)
+			{
+				Logger.Warning("Resume refused: conversation recovery is blocked pending verification.", _instanceId);
+				return Task.FromResult(result: false);
+			}
 			_paused = false;
 			Logger.Success("RESUMED.", _instanceId);
 			return Task.FromResult(result: true);
@@ -246,12 +253,21 @@ public class BotEngine
 		if (IsBrowserAlive) { _paused = true; Logger.Warning("PAUSED.", _instanceId); }
 	}
 
-	public void ResumePause() => _paused = false;
+	public void ResumePause()
+	{
+		if (_recoveryBlocked)
+		{
+			Logger.Warning("Resume refused: conversation recovery is blocked pending verification.", _instanceId);
+			return;
+		}
+		_paused = false;
+	}
 
 	public async Task FullStopAsync()
 	{
 		_running = false;
 		_paused = false;
+		_recoveryBlocked = false;
 		_cts?.Cancel();
 		Exception? cleanupError = null;
 		try { await CloseControllerAsync(); }
@@ -419,8 +435,17 @@ public class BotEngine
 				{
 					await LogCycleWaitAsync("Promotional message", _config.WaitAfterPromo);
 					Logger.Step("/stop", _instanceId);
-					await _controller.TypeAsync("/stop");
-					await _controller.PressEnterAsync();
+					bool stopTyped = await _controller.TypeAsync("/stop");
+					bool stopSubmitted = stopTyped && await _controller.PressEnterAsync();
+					if (!stopSubmitted)
+					{
+						string reason = $"Cycle {_cyclesOnCurrentBot}: /stop delivery is uncertain; automation remains paused to avoid resending it.";
+						_paused = true;
+						_recoveryBlocked = true;
+						Logger.Error($"[Recovery] Promotion paused. {reason}", _instanceId);
+						await _controller.CaptureRecoveryFailureAsync(reason);
+						continue;
+					}
 					Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | /stop command sent; configured wait {_config.WaitAfterStop}ms.", _instanceId);
 					if (await Wait(_config.WaitAfterStop, ct))
 					{
@@ -430,6 +455,10 @@ public class BotEngine
 						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Escape pressed after /stop; cycle completed.", _instanceId);
 						_completedCycles++;
 						Logger.Success($"Cycle {_cyclesOnCurrentBot}/{_config.CyclesPerBot} done on @{_currentBotUsername}", _instanceId);
+						if (_controller != null && !await _controller.VerifyExpectedBotConversationAsync(_currentBotUsername, requireMessageInput: false))
+						{
+							await RecoverConversationAfterStopAsync(_cyclesOnCurrentBot, ct);
+						}
 						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Next cycle will start if configured cycles remain.", _instanceId);
 						continue;
 					}
@@ -519,6 +548,46 @@ public class BotEngine
 		}
 		Logger.Success($"Now on @{_currentBotUsername} ({nextIndex + 1}/{_config.BotList.Count})", _instanceId);
 		return true;
+	}
+
+	private async Task<bool> RecoverConversationAfterStopAsync(int completedCycle, CancellationToken ct)
+	{
+		if (_controller == null) return false;
+		_paused = true;
+		_recoveryBlocked = true;
+		Logger.Warning($"[Recovery] Conversation navigation loss detected after cycle {completedCycle}; last completed action was /stop and its existing post-stop action. Promotion paused.", _instanceId);
+		Logger.Info($"[Recovery] Recovery navigation started for @{_currentBotUsername}.", _instanceId);
+		string failure = "Conversation recovery could not be completed.";
+		try
+		{
+			if (!await _controller.TryNavigateToBotChatAsync(_currentBotUsername))
+			{
+				failure = $"Could not navigate back to @{_currentBotUsername}.";
+			}
+			else if (!await _controller.VerifyExpectedBotConversationAsync(_currentBotUsername, requireMessageInput: true))
+			{
+				failure = $"Recovered navigation did not verify the expected conversation and message input for @{_currentBotUsername}.";
+			}
+			else
+			{
+				Logger.Success($"[Recovery] Expected conversation restored after cycle {completedCycle}: @{_currentBotUsername}.", _instanceId);
+				_recoveryBlocked = false;
+				_paused = false;
+				Logger.Success($"[Recovery] Promotion resumed at cycle {completedCycle + 1}.", _instanceId);
+				return true;
+			}
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			failure = "Conversation recovery was cancelled during shutdown.";
+		}
+		catch (Exception ex)
+		{
+			failure = ex.Message;
+		}
+		Logger.Error($"[Recovery] Recovery failed; promotion remains paused. {failure}", _instanceId);
+		await _controller.CaptureRecoveryFailureAsync(failure);
+		return false;
 	}
 
 	private async Task CloseControllerAsync()
