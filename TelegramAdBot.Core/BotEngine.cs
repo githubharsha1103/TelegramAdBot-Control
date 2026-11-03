@@ -193,7 +193,7 @@ public class BotEngine
 			}
 			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
 			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
-			if (!await _controller.PrepareStartupChatAndDismissReplyKeyboardAsync(_currentBotUsername)) throw new InvalidOperationException("Startup chat focus/Escape verification failed.");
+			if (!await _controller.VerifyStartupChatAndFocusMessageInputAsync(_currentBotUsername)) throw new InvalidOperationException("Startup chat/input verification failed; no startup Escape was sent.");
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
 			_initializedForNextLoop = true;

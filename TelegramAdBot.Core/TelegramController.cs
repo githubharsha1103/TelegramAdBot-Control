@@ -375,10 +375,10 @@ public class TelegramController : IAsyncDisposable
 		}
 	}
 
-	public async Task<bool> PrepareStartupChatAndDismissReplyKeyboardAsync(string botUsername)
+	public async Task<bool> VerifyStartupChatAndFocusMessageInputAsync(string botUsername)
 	{
 		ILocator? messageInput = null;
-		string urlBeforeEscape = "<unavailable>";
+		string urlBeforeFocus = "<unavailable>";
 		try
 		{
 			if (_page == null || _page.IsClosed) return false;
@@ -387,29 +387,27 @@ public class TelegramController : IAsyncDisposable
 			await _page.BringToFrontAsync();
 			messageInput = _page.Locator(".input-message-input[contenteditable='true']");
 			await messageInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
-			urlBeforeEscape = _page.Url;
+			urlBeforeFocus = _page.Url;
 			await BrowserDiagnosticAsync($"Startup bot conversation @{botUsername} active; message input visible", "before-focus", screenshot: true);
 			await messageInput.FocusAsync();
-			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Focused message input; waiting exactly 2 seconds before Escape.", _instanceId);
-			await Task.Delay(TimeSpan.FromSeconds(2));
-			if (!await messageInput.EvaluateAsync<bool>("element => document.activeElement === element"))
-				throw new InvalidOperationException("Telegram message input lost focus during the required 2-second wait.");
-			await _page.Keyboard.PressAsync("Escape");
-			await BrowserDiagnosticAsync("Startup Escape pressed", "after", screenshot: true);
-			bool conversationStillOpen = !_page.IsClosed && _page.Url == urlBeforeEscape && messageInput != null && await messageInput.IsVisibleAsync();
-			if (!conversationStillOpen)
+			await BrowserDiagnosticAsync("Startup message input FocusAsync completed (active element captured immediately)", "after-focus", screenshot: true);
+			bool inputHasFocus = await messageInput.EvaluateAsync<bool>("element => document.activeElement === element");
+			bool conversationStillOpen = !_page.IsClosed && _page.Url == urlBeforeFocus && await messageInput.IsVisibleAsync();
+			bool expectedBotRoute = Uri.TryCreate(urlBeforeFocus, UriKind.Absolute, out Uri? activeUri) &&
+				string.Equals(activeUri.Fragment, "#@" + botUsername.TrimStart('@'), StringComparison.OrdinalIgnoreCase);
+			if (!inputHasFocus || !conversationStillOpen || !expectedBotRoute)
 			{
-				await BrowserDiagnosticAsync($"Startup Escape changed or closed @{botUsername} conversation; startup halted", "failure", screenshot: true);
-				Logger.Error($"[StartupDiag] Escape closed or changed the @{botUsername} conversation. Startup halted; no recovery click will be attempted.", _instanceId);
+				await BrowserDiagnosticAsync($"Startup message-input focus or conversation verification failed for @{botUsername}; startup halted", "failure", screenshot: true);
+				Logger.Error($"[StartupDiag] Message-input focus or conversation verification failed for @{botUsername}. Startup halted; no recovery click will be attempted.", _instanceId);
 				return false;
 			}
-			Logger.Success($"[StartupDiag] Escape completed; @{botUsername} conversation remains open.", _instanceId);
+			Logger.Info($"[StartupDiag] Startup Escape skipped: Telegram Web K dismissal behavior is not safe for this bot keyboard. @{botUsername} remains open; message input is active.", _instanceId);
 			return true;
 		}
 		catch (Exception ex)
 		{
-			await BrowserDiagnosticAsync($"Startup chat verification/dismissal failed for @{botUsername}: {ex.Message}", "failure", screenshot: true);
-			Logger.Error($"[StartupDiag] Startup Escape sequence failed for @{botUsername}: {ex.Message}", _instanceId);
+			await BrowserDiagnosticAsync($"Startup chat/input verification failed for @{botUsername}: {ex.Message}", "failure", screenshot: true);
+			Logger.Error($"[StartupDiag] Startup chat/input verification failed for @{botUsername}: {ex.Message}", _instanceId);
 			return false;
 		}
 	}
