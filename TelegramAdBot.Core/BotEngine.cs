@@ -391,6 +391,7 @@ public class BotEngine
 					break;
 				}
 				await LogCycleWaitAsync("Search command", _config.WaitAfterSearch);
+				await Task.Delay(1000, ct);
 				if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape after partner search.");
 				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Escape pressed after search.", _instanceId);
 				await Task.Delay(1000, ct);
@@ -427,6 +428,7 @@ public class BotEngine
 					if (await Wait(_config.WaitAfterStop, ct))
 					{
 						await LogCycleWaitAsync("/stop command", _config.WaitAfterStop);
+						await Task.Delay(1000, ct);
 						if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape after /stop.");
 						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Escape pressed after /stop; cycle completed.", _instanceId);
 						_completedCycles++;
