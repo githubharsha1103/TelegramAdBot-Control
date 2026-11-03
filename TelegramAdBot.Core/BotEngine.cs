@@ -382,6 +382,7 @@ public class BotEngine
 					break;
 				}
 				if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat after partner search.");
+				await Task.Delay(1000, ct);
 				Logger.Step("emoji button click", _instanceId);
 				await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY);
 				if (!(await Wait(_config.WaitAfterEmojiClick, ct)))
