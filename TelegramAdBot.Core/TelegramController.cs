@@ -261,17 +261,6 @@ public class TelegramController : IAsyncDisposable
 			catch
 			{
 			}
-			for (int i = 0; i < 2; i++)
-			{
-				try
-				{
-					await _page.Keyboard.PressAsync("Escape");
-				}
-				catch
-				{
-				}
-				await Task.Delay(250);
-			}
 			bool searchClicked = false;
 			try
 			{
@@ -308,6 +297,7 @@ public class TelegramController : IAsyncDisposable
 			});
 			await Task.Delay(500);
 			await _page.Keyboard.PressAsync("Enter");
+			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
 			await Task.Delay(2000);
 			Logger.Success("Opened @" + clean, _instanceId);
 			return true;
@@ -315,6 +305,25 @@ public class TelegramController : IAsyncDisposable
 		catch (Exception ex2)
 		{
 			Logger.Warning("Navigation failed: " + ex2.Message, _instanceId);
+			return false;
+		}
+	}
+
+	public async Task<bool> DismissReplyKeyboardAsync()
+	{
+		try
+		{
+			if (_page == null || _page.IsClosed) return false;
+			await _page.BringToFrontAsync();
+			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+			await _page.Mouse.ClickAsync(_config.TextboxX, _config.TextboxY);
+			await _page.Keyboard.PressAsync("Escape");
+			Logger.Info("[Chat] Reply keyboard dismissal attempted with Escape.", _instanceId);
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning("[Chat] Could not dismiss reply keyboard: " + ex.Message, _instanceId);
 			return false;
 		}
 	}

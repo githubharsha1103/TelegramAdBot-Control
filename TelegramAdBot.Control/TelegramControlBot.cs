@@ -59,9 +59,10 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     private readonly ConcurrentDictionary<string, byte> _terminalNotifiedRuns = new();
     private readonly ConcurrentDictionary<long, string> _statusCallbackTokens = new();
     private readonly ConcurrentDictionary<long, string> _managementCallbackTokens = new();
-    private readonly ConcurrentDictionary<long, SemaphoreSlim> _messageApiLocks = new();
-    private readonly ConcurrentDictionary<long, DateTimeOffset> _lastMessageOperation = new();
-    private readonly ConcurrentDictionary<long, DateTimeOffset> _rateLimitedUntil = new();
+    private readonly SemaphoreSlim _messageApiGate = new(1, 1);
+    private readonly object _rateLimitSync = new();
+    private DateTimeOffset? _globalRateLimitedUntil;
+    private DateTimeOffset _lastMessageOperation;
     private readonly ConcurrentDictionary<long, DateTimeOffset> _addBotPending = new();
     private readonly ConcurrentDictionary<long, string> _removeBotPending = new();
     private readonly ConcurrentDictionary<long, byte> _legacyReplyKeyboardRemoved = new();
@@ -103,7 +104,11 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         foreach (var (chatId, state) in _controlStateStore.Snapshot())
         {
             if (state.RateLimitedUntil is DateTimeOffset blockedUntil && blockedUntil > DateTimeOffset.UtcNow)
-                _rateLimitedUntil[chatId] = blockedUntil;
+            {
+                lock (_rateLimitSync)
+                    if (_globalRateLimitedUntil is not DateTimeOffset current || blockedUntil > current) _globalRateLimitedUntil = blockedUntil;
+                Helpers.Logger.Warning($"[CONTROL] restoring Telegram cooldown chat={chatId} until={blockedUntil:O} remaining={(int)Math.Ceiling((blockedUntil - DateTimeOffset.UtcNow).TotalSeconds)}s; Telegram retry_after must expire before another message operation");
+            }
             if (state.LegacyReplyKeyboardRemoved) _legacyReplyKeyboardRemoved[chatId] = 0;
             if (state.PrimaryMessageId is int primaryMessageId)
             {
@@ -142,13 +147,11 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         if (update.CallbackQuery is { } callback)
         {
             Helpers.Logger.Info($"[CONTROL] update received type=callback category={(callback.Data?.Split(':').FirstOrDefault() ?? "unknown")} message_id={callback.Message?.MessageId.ToString() ?? "none"}");
-            _ = AcknowledgeCallbackAsync(callback.Id, ct);
-            QueueLegacyReplyKeyboardRemoval(chatId.Value, ct);
+            _ = AcknowledgeCallbackAsync(chatId.Value, callback.Id, ct);
             await CallbackAsync(chatId.Value, callback.Message?.MessageId, callback.Data ?? "", ct);
             return;
         }
 
-        QueueLegacyReplyKeyboardRemoval(chatId.Value, ct);
         string text = update.Message?.Text?.Trim() ?? "";
         Helpers.Logger.Info($"[CONTROL] update received type=message action={RecognizeNavigationAction(text)}");
         if (text.Equals("/start", StringComparison.OrdinalIgnoreCase) || text.StartsWith("/start@", StringComparison.OrdinalIgnoreCase) ||
@@ -221,10 +224,37 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Update handling failed safely: " + ex.Message); }
     }
 
-    private async Task AcknowledgeCallbackAsync(string callbackId, CancellationToken ct)
+    private async Task AcknowledgeCallbackAsync(long chatId, string callbackId, CancellationToken ct)
     {
-        try { await _bot.AnswerCallbackQuery(callbackId, cancellationToken: ct); }
+        TimeSpan cooldown = GetServerCooldownRemaining();
+        if (cooldown > TimeSpan.Zero)
+        {
+            Helpers.Logger.Warning($"[CONTROL] callback acknowledgement skipped during Telegram cooldown chat={chatId} remaining={(int)Math.Ceiling(cooldown.TotalSeconds)}s");
+            return;
+        }
+        try { await _messageApiGate.WaitAsync(ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+        cooldown = GetServerCooldownRemaining();
+        if (cooldown > TimeSpan.Zero)
+        {
+            _messageApiGate.Release();
+            Helpers.Logger.Warning($"[CONTROL] callback acknowledgement skipped during Telegram cooldown chat={chatId} remaining={(int)Math.Ceiling(cooldown.TotalSeconds)}s");
+            return;
+        }
+        try
+        {
+            await _bot.AnswerCallbackQuery(callbackId, cancellationToken: ct);
+            MarkMessageOperation();
+        }
+        catch (ApiRequestException ex) when (ex.ErrorCode == 429)
+        {
+            int retryAfter = TelegramRetryAfter.Parse(ex);
+            SetRateLimit(chatId, retryAfter);
+            Helpers.Logger.Warning($"[CONTROL] callback acknowledgement rate limited chat={chatId} retry_after={retryAfter}s error={ex.Message}");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex) { Helpers.Logger.Warning("[CONTROL] Callback acknowledgement failed: " + ex.Message); }
+        finally { _messageApiGate.Release(); }
     }
 
     private static string RecognizeNavigationAction(string text)
@@ -263,16 +293,32 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             PromotionRunState.Failed => "❌ FAILED",
             _ => "🟢 IDLE"
         };
-        string instances = status.SelectedInstanceIds.Count == 0 ? "—" : string.Join(", ", status.SelectedInstanceIds);
         int openBrowsers = status.RunningInstanceIds.Concat(_controller.GetOpenManualInstanceIds()).Distinct().Count();
+        int mappedAccounts = status.IsConfigured ? status.AccountCount : 0;
+        string promotion = status.RunState switch
+        {
+            PromotionRunState.Running => "Running",
+            PromotionRunState.Paused => "Paused",
+            PromotionRunState.Stopping => "Stopping",
+            PromotionRunState.Stopped => "Stopped",
+            PromotionRunState.Completed => "Completed",
+            PromotionRunState.Failed => "Failed",
+            _ => "None"
+        };
         var lines = new List<string>
         {
-            "🚀 PROMOTION CONTROL", "", "Status: " + state, "",
-            "Selected instances: " + instances,
-            $"Configured instances: {_controller.GetConfiguredInstanceIds().Count}",
-            $"Cycles: {status.CompletedCycles}/{status.TotalCycles}",
-            $"Open browsers: {openBrowsers}",
-            "Last operation: " + (_lastNotification.TryGetValue(chatId, out string operation) ? operation : "—")
+            "🚀  TELEGRAM AD BOT",
+            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+            "⚙️  AUTOMATION       " + state,
+            $"🤖  Promotion bots   {_controller.GetConfiguredBotCount()}",
+            $"👥  Accounts in run  {mappedAccounts}",
+            $"🖥  Profiles         {_controller.GetConfiguredInstanceIds().Count}",
+            $"🟢  Running now      {status.RunningInstanceIds.Count}",
+            $"📈  Completed cycles {status.CompletedCycles}/{status.TotalCycles}",
+            $"🌐  Open browsers    {openBrowsers}",
+            $"🚀  Active promotion {promotion}",
+            "⚡  Last action      " + (_lastNotification.TryGetValue(chatId, out string operation) ? operation : "—"),
+            "▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁"
         };
         string error = !string.IsNullOrWhiteSpace(status.LastError) ? status.LastError :
             status.Instances.Select(instance => instance.Error).FirstOrDefault(message => !string.IsNullOrWhiteSpace(message));
@@ -308,14 +354,16 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             try
             {
                 await _bot.EditMessageText(chatId, messageId, screen.Text, replyMarkup: screen.Keyboard, cancellationToken: ct);
-                _lastMessageOperation[chatId] = DateTimeOffset.UtcNow;
+                MarkMessageOperation();
                 _controlRenderKeys[chatId] = screen.RenderKey;
                 Helpers.Logger.Info($"[CONTROL] render edited chat={chatId} message={messageId} screen={screen.Name} revision={screen.Revision}");
+                QueueLegacyReplyKeyboardRemoval(chatId, ct);
                 return new ControlMessageResult(ControlMessageOperation.Applied);
             }
             catch (ApiRequestException ex) when (IsMessageNotModified(ex))
             {
                 _controlRenderKeys[chatId] = screen.RenderKey;
+                QueueLegacyReplyKeyboardRemoval(chatId, ct);
                 return new ControlMessageResult(ControlMessageOperation.Applied);
             }
             catch (ApiRequestException ex) when (ex.ErrorCode == 429)
@@ -353,7 +401,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             try
             {
                 Message sent = await _bot.SendMessage(chatId, screen.Text, replyMarkup: screen.Keyboard, cancellationToken: ct);
-                _lastMessageOperation[chatId] = DateTimeOffset.UtcNow;
+                MarkMessageOperation();
                 _panelMessages[chatId] = sent.MessageId;
                 _statusMessages[chatId] = sent.MessageId;
                 _selectionMessages[chatId] = sent.MessageId;
@@ -363,6 +411,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
                 var state = _screenStates.GetOrAdd(chatId, _ => new ControlScreenState()); state.TrackPrimaryMessage(sent.MessageId);
                 _controlStateStore.SetPrimaryMessage(chatId, sent.MessageId);
                 Helpers.Logger.Info($"[CONTROL] primary message created chat={chatId} message={sent.MessageId} screen={screen.Name} revision={screen.Revision}");
+                QueueLegacyReplyKeyboardRemoval(chatId, ct);
                 return new ControlMessageResult(ControlMessageOperation.Applied, sent.MessageId);
             }
             catch (ApiRequestException ex) when (ex.ErrorCode == 429)
@@ -429,10 +478,11 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private static InlineKeyboardMarkup DashboardKeyboard(string token, PromotionStatus status) => new(new[]
     {
-        new[] { InlineKeyboardButton.WithCallbackData("⚙️ Configure", TaggedCallback("panel", token, "configure")), InlineKeyboardButton.WithCallbackData("▶️ Start", TaggedCallback("panel", token, "start")) },
-        status.IsRunning || status.IsPaused ? new[] { InlineKeyboardButton.WithCallbackData(status.IsPaused ? "▶️ Resume" : "⏸ Pause", TaggedCallback("panel", token, status.IsPaused ? "resume" : "pause")), InlineKeyboardButton.WithCallbackData("🛑 Stop", TaggedCallback("panel", token, "stop")) } : new[] { InlineKeyboardButton.WithCallbackData("🔄 Refresh", TaggedCallback("panel", token, "refresh")) },
-        new[] { InlineKeyboardButton.WithCallbackData("🖥 Instances", TaggedCallback("panel", token, "instances")), InlineKeyboardButton.WithCallbackData("👥 Accounts", TaggedCallback("panel", token, "accounts")), InlineKeyboardButton.WithCallbackData("🤖 Bots", TaggedCallback("panel", token, "bots")) },
-        new[] { InlineKeyboardButton.WithCallbackData("📊 Activity", TaggedCallback("panel", token, "status")), InlineKeyboardButton.WithCallbackData("🏠 Dashboard", TaggedCallback("panel", token, "refresh")) }
+        new[] { InlineKeyboardButton.WithCallbackData("⚙️ Configure", TaggedCallback("panel", token, "configure")), InlineKeyboardButton.WithCallbackData(status.IsRunning || status.IsPaused ? "🚀 Promotion" : "▶️ Start Promotion", TaggedCallback("panel", token, status.IsRunning || status.IsPaused ? "promotion" : "start")) },
+        status.IsRunning || status.IsPaused ? new[] { InlineKeyboardButton.WithCallbackData(status.IsPaused ? "▶️ Resume" : "⏸ Pause", TaggedCallback("panel", token, status.IsPaused ? "resume" : "pause")), InlineKeyboardButton.WithCallbackData("🛑 Stop", TaggedCallback("panel", token, "stop")) } : new[] { InlineKeyboardButton.WithCallbackData("🔄 Refresh", TaggedCallback("panel", token, "refresh")), InlineKeyboardButton.WithCallbackData("🚀 Promotion", TaggedCallback("panel", token, "promotion")) },
+        new[] { InlineKeyboardButton.WithCallbackData("🤖 Bots", TaggedCallback("panel", token, "bots")), InlineKeyboardButton.WithCallbackData("👥 Accounts", TaggedCallback("panel", token, "accounts")) },
+        new[] { InlineKeyboardButton.WithCallbackData("🖥 Instances", TaggedCallback("panel", token, "instances")), InlineKeyboardButton.WithCallbackData("📊 Activity", TaggedCallback("panel", token, "status")) },
+        new[] { InlineKeyboardButton.WithCallbackData("⚙️ Settings", TaggedCallback("panel", token, "settings")), InlineKeyboardButton.WithCallbackData("❓ Help", TaggedCallback("panel", token, "help")) }
     });
 
     private async Task BeginAsync(long chatId, CancellationToken ct)
@@ -572,6 +622,8 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             if (panelAction == "accounts") { await AccountsAsync(chatId, ct); return; }
             if (panelAction == "bots") { await ManageBotsAsync(chatId, ct); return; }
             if (panelAction == "status") { await StatusAsync(chatId, ct); return; }
+            if (panelAction == "promotion") { await StatusAsync(chatId, ct); return; }
+            if (panelAction == "settings") { await SettingsAsync(chatId, ct); return; }
             if (panelAction == "help") { await HelpAsync(chatId, ct); return; }
             if (panelAction == "refresh") { await RenderDashboardAsync(chatId, ct); return; }
             return;
@@ -1158,13 +1210,15 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
 
     private async Task TryRemoveLegacyReplyKeyboardAsync(long chatId, CancellationToken ct)
     {
-        SemaphoreSlim gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        if (!await TryAcquireMessageApiLockAsync(chatId, gate, ct)) return;
+        // Run cleanup only after Telegram confirms that a usable panel is already
+        // visible. Wait outside the per-chat API lock so the first dashboard send
+        // cannot be blocked by the legacy-keyboard cleanup.
+        SemaphoreSlim gate = await AcquireMessageApiLockAsync(chatId, ct);
         try
         {
             try
             {
-                await _bot.SendMessage(chatId, "The old menu has been removed. Use the buttons attached to each screen.",
+                await _bot.SendMessage(chatId, "Use the buttons attached to the dashboard to navigate.",
                     replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
                 _legacyReplyKeyboardRemoved[chatId] = 0;
                 _controlStateStore.SetLegacyReplyKeyboardRemoved(chatId);
@@ -1178,15 +1232,14 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) { Helpers.Logger.Warning($"[CONTROL] legacy keyboard removal failed chat={chatId} error={ex}"); }
-            finally { _lastMessageOperation[chatId] = DateTimeOffset.UtcNow; }
+            finally { MarkMessageOperation(); }
         }
         finally { gate.Release(); }
     }
 
     private async Task<Message> SafeSendAsync(long chatId, string text, InlineKeyboardMarkup? keyboard, CancellationToken ct, string actionName = "message-send")
     {
-        var gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        if (!await TryAcquireMessageApiLockAsync(chatId, gate, ct))
+        if (!await TryAcquireMessageApiLockAsync(ct))
         {
             Helpers.Logger.Info($"[CONTROL] non-screen send skipped during Telegram cooldown or active message operation chat={chatId} action={actionName}");
             return null;
@@ -1203,64 +1256,83 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
                 return null;
             }
             catch (Exception ex) { Helpers.Logger.Warning($"[CONTROL] Telegram send failed: chat_id={chatId} action={actionName} error={ex.Message}"); return null; }
-            finally { _lastMessageOperation[chatId] = DateTimeOffset.UtcNow; }
+            finally { MarkMessageOperation(); }
         }
-        finally { gate.Release(); }
+        finally { _messageApiGate.Release(); }
     }
 
     private async Task<SemaphoreSlim> AcquireMessageApiLockAsync(long chatId, CancellationToken ct)
     {
-        SemaphoreSlim gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
         while (true)
         {
             TimeSpan delay = GetMessageApiDelay(chatId);
             if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
-            await gate.WaitAsync(ct);
+            await _messageApiGate.WaitAsync(ct);
             delay = GetMessageApiDelay(chatId);
-            if (delay <= TimeSpan.Zero) return gate;
-            gate.Release();
+            if (delay <= TimeSpan.Zero) return _messageApiGate;
+            _messageApiGate.Release();
         }
     }
 
     private async Task<(SemaphoreSlim? Gate, int RetryAfterSeconds)> TryAcquireScreenMessageLockAsync(long chatId, CancellationToken ct)
     {
-        SemaphoreSlim gate = _messageApiLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        await _messageApiGate.WaitAsync(ct);
         TimeSpan delay = GetMessageApiDelay(chatId);
-        if (delay <= TimeSpan.Zero) return (gate, 0);
+        if (delay <= TimeSpan.Zero) return (_messageApiGate, 0);
 
-        gate.Release();
+        _messageApiGate.Release();
         int seconds = Math.Max(1, (int)Math.Ceiling(delay.TotalSeconds));
+        TimeSpan serverCooldown = GetServerCooldownRemaining();
+        if (serverCooldown > TimeSpan.Zero)
+            Helpers.Logger.Info($"[CONTROL] Telegram API cooldown active chat={chatId} remaining={seconds}s");
         return (null, seconds);
     }
 
-    private async Task<bool> TryAcquireMessageApiLockAsync(long chatId, SemaphoreSlim gate, CancellationToken ct)
+    private async Task<bool> TryAcquireMessageApiLockAsync(CancellationToken ct)
     {
-        if (GetMessageApiDelay(chatId) > TimeSpan.Zero || !await gate.WaitAsync(0, ct)) return false;
-        if (GetMessageApiDelay(chatId) <= TimeSpan.Zero) return true;
-        gate.Release();
+        if (GetMessageApiDelay(0) > TimeSpan.Zero || !await _messageApiGate.WaitAsync(0, ct)) return false;
+        if (GetMessageApiDelay(0) <= TimeSpan.Zero) return true;
+        _messageApiGate.Release();
         return false;
     }
 
     private TimeSpan GetMessageApiDelay(long chatId)
     {
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        TimeSpan remaining = TimeSpan.Zero;
-        if (_rateLimitedUntil.TryGetValue(chatId, out DateTimeOffset blockedUntil) && blockedUntil > now)
-            remaining = blockedUntil - now;
-        if (_lastMessageOperation.TryGetValue(chatId, out DateTimeOffset last))
+        lock (_rateLimitSync)
         {
-            TimeSpan spacing = TimeSpan.FromSeconds(1) - (now - last);
-            if (spacing > remaining) remaining = spacing;
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            TimeSpan remaining = _globalRateLimitedUntil is DateTimeOffset until ? until - now : TimeSpan.Zero;
+            if (_lastMessageOperation != default)
+            {
+                TimeSpan spacing = TimeSpan.FromSeconds(1) - (now - _lastMessageOperation);
+                if (spacing > remaining) remaining = spacing;
+            }
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
         }
-        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
+
+    private TimeSpan GetServerCooldownRemaining()
+    {
+        lock (_rateLimitSync)
+        {
+            TimeSpan remaining = _globalRateLimitedUntil is DateTimeOffset until ? until - DateTimeOffset.UtcNow : TimeSpan.Zero;
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+        }
+    }
+
+    private void MarkMessageOperation()
+    {
+        lock (_rateLimitSync) _lastMessageOperation = DateTimeOffset.UtcNow;
     }
 
     private void SetRateLimit(long chatId, int retryAfterSeconds)
     {
         DateTimeOffset until = DateTimeOffset.UtcNow.AddSeconds(Math.Max(retryAfterSeconds, 1));
-        _rateLimitedUntil.AddOrUpdate(chatId, until, (_, existing) => existing > until ? existing : until);
-        _controlStateStore.SetRateLimitedUntil(chatId, until);
+        lock (_rateLimitSync)
+        {
+            if (_globalRateLimitedUntil is not DateTimeOffset current || until > current) _globalRateLimitedUntil = until;
+            _controlStateStore.SetRateLimitedUntil(chatId, until);
+        }
     }
 
     private static bool IsMessageNotModified(ApiRequestException ex) => ex.ErrorCode == 400 && ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase);

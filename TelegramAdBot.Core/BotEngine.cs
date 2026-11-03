@@ -193,6 +193,7 @@ public class BotEngine
 			}
 			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
 			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
+			if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat and dismiss its reply keyboard.");
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
 			_initializedForNextLoop = true;
@@ -379,6 +380,7 @@ public class BotEngine
 				{
 					break;
 				}
+				if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat after partner search.");
 				Logger.Step("emoji button click", _instanceId);
 				await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY);
 				if (!(await Wait(_config.WaitAfterEmojiClick, ct)))
@@ -405,6 +407,7 @@ public class BotEngine
 					await _controller.PressEnterAsync();
 					if (await Wait(_config.WaitAfterStop, ct))
 					{
+						if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat after /stop.");
 						_completedCycles++;
 						Logger.Success($"Cycle {_cyclesOnCurrentBot}/{_config.CyclesPerBot} done on @{_currentBotUsername}", _instanceId);
 						continue;
