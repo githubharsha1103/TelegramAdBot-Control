@@ -400,6 +400,23 @@ public class TelegramController : IAsyncDisposable
 		return true;
 	}
 
+	public async Task<bool> VerifyStickerPickerReadyAsync()
+	{
+		try
+		{
+			if (_page == null || _page.IsClosed) return false;
+			await _page.Locator(".emoji-dropdown").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
+			await _page.Locator(".emoji-dropdown .emoji-tabs-stickers.active").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
+			Logger.Success("[Recovery] Sticker picker is visible and the Stickers tab is active.", _instanceId);
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning($"[Recovery] Sticker picker readiness check failed: {ex.Message}", _instanceId);
+			return false;
+		}
+	}
+
 	public async Task CaptureRecoveryFailureAsync(string reason)
 	{
 		await BrowserDiagnosticAsync("Conversation recovery failed: " + reason, "recovery-failure", screenshot: true);

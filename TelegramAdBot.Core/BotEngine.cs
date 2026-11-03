@@ -47,6 +47,8 @@ public class BotEngine
 
 	private int _promoIndex;
 
+	private bool _stopDeliveredForCurrentCycle;
+
 	private string _currentBotUsername = "";
 
 	public int InstanceId => _instanceId;
@@ -292,7 +294,7 @@ public class BotEngine
 		Logger.Warning("STOPPED.", _instanceId);
 	}
 
-	private async Task<bool> PrepareBotForCyclingAsync(CancellationToken ct)
+	private async Task<bool> PrepareBotForCyclingAsync(CancellationToken ct, bool verifyStickerPickerReady = false)
 	{
 		if (_controller == null) return false;
 		Logger.Step($"Preparing chat: waiting {_config.WaitAfterNavigate}ms...", _instanceId);
@@ -330,6 +332,7 @@ public class BotEngine
 		}
 		Logger.Success("Chat ready for cycling.", _instanceId);
 		Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Sticker configuration completed.", _instanceId);
+		if (verifyStickerPickerReady && !await _controller.VerifyStickerPickerReadyAsync()) return false;
 		return true;
 	}
 
@@ -387,6 +390,7 @@ public class BotEngine
 				IL_03aa:
 				_totalCycles++;
 				_cyclesOnCurrentBot++;
+				_stopDeliveredForCurrentCycle = false;
 				Logger.Cycle(_totalCycles, _instanceId, _cyclesOnCurrentBot, _config.CyclesPerBot, _currentBotUsername, _currentBotIndex + 1, _config.BotList.Count);
 				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Cycle {_cyclesOnCurrentBot} started.", _instanceId);
 				if (firstCycle)
@@ -446,6 +450,7 @@ public class BotEngine
 						await _controller.CaptureRecoveryFailureAsync(reason);
 						continue;
 					}
+					_stopDeliveredForCurrentCycle = true;
 					Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | /stop command sent; configured wait {_config.WaitAfterStop}ms.", _instanceId);
 					if (await Wait(_config.WaitAfterStop, ct))
 					{
@@ -557,6 +562,7 @@ public class BotEngine
 		_recoveryBlocked = true;
 		Logger.Warning($"[Recovery] Conversation navigation loss detected after cycle {completedCycle}; last completed action was /stop and its existing post-stop action. Promotion paused.", _instanceId);
 		Logger.Info($"[Recovery] Recovery navigation started for @{_currentBotUsername}.", _instanceId);
+		string failureStage = "bot navigation";
 		string failure = "Conversation recovery could not be completed.";
 		try
 		{
@@ -566,7 +572,18 @@ public class BotEngine
 			}
 			else if (!await _controller.VerifyExpectedBotConversationAsync(_currentBotUsername, requireMessageInput: true))
 			{
+				failureStage = "URL or message input verification";
 				failure = $"Recovered navigation did not verify the expected conversation and message input for @{_currentBotUsername}.";
+			}
+			else if (!await PrepareBotForCyclingAsync(ct, verifyStickerPickerReady: true))
+			{
+				failureStage = "sticker setup initialization";
+				failure = $"Sticker setup did not complete for cycle {completedCycle}.";
+			}
+			else if (!_stopDeliveredForCurrentCycle && !await SubmitStopOnceDuringRecoveryAsync(completedCycle))
+			{
+				failureStage = "/stop submission";
+				failure = $"Recovery could not verify /stop submission for cycle {completedCycle}; it will not be retried.";
 			}
 			else
 			{
@@ -585,9 +602,25 @@ public class BotEngine
 		{
 			failure = ex.Message;
 		}
-		Logger.Error($"[Recovery] Recovery failed; promotion remains paused. {failure}", _instanceId);
-		await _controller.CaptureRecoveryFailureAsync(failure);
+		Logger.Error($"[Recovery] Recovery failed at stage '{failureStage}' after cycle {completedCycle}; promotion remains paused. {failure}", _instanceId);
+		await _controller.CaptureRecoveryFailureAsync($"cycle {completedCycle}, stage {failureStage}: {failure}");
 		return false;
+	}
+
+	private async Task<bool> SubmitStopOnceDuringRecoveryAsync(int cycleNumber)
+	{
+		if (_controller == null || _stopDeliveredForCurrentCycle) return _stopDeliveredForCurrentCycle;
+		Logger.Info($"[Recovery] Cycle {cycleNumber}: /stop was not recorded as delivered; submitting it once after sticker setup.", _instanceId);
+		bool typed = await _controller.TypeAsync("/stop");
+		bool submitted = typed && await _controller.PressEnterAsync();
+		if (!submitted)
+		{
+			Logger.Error($"[Recovery] Cycle {cycleNumber}: /stop delivery is uncertain; it will not be retried.", _instanceId);
+			return false;
+		}
+		_stopDeliveredForCurrentCycle = true;
+		Logger.Info($"[Recovery] Cycle {cycleNumber}: /stop submitted once during recovery.", _instanceId);
+		return true;
 	}
 
 	private async Task CloseControllerAsync()
