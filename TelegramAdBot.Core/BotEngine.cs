@@ -141,10 +141,10 @@ public class BotEngine
 		return true;
 	}
 
-	public async Task<bool> NavigateToFirstBotAsync()
+	public async Task<bool> NavigateToFirstBotAsync(bool startup = false)
 	{
 		if (_controller == null) return false;
-		bool success = await _controller.TryNavigateToBotChatAsync(_currentBotUsername);
+		bool success = await _controller.TryNavigateToBotChatAsync(_currentBotUsername, waitAfterEnter: !startup);
 		if (success) Logger.Success($"Ready on @{_currentBotUsername} (1/{_config.BotList.Count})", _instanceId);
 		return success;
 	}
@@ -188,15 +188,12 @@ public class BotEngine
 			{
 				Logger.Info($"[Bot] Searching/opening @{_currentBotUsername} (attempt {attempt}/3).", _instanceId);
 				if (attempt > 1) Logger.Warning($"[PromotionInit] Retrying bot search/navigation ({attempt}/3) for @{_currentBotUsername}.", _instanceId);
-				navigationCompleted = await NavigateToFirstBotAsync();
+				navigationCompleted = await NavigateToFirstBotAsync(startup: true);
 				if (!navigationCompleted && attempt < 3) await Task.Delay(1000);
 			}
 			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
 			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
-			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Startup 5-second wait started.", _instanceId);
-			await Task.Delay(TimeSpan.FromSeconds(5));
-			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Startup 5-second wait completed.", _instanceId);
-			if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape during startup reply-keyboard dismissal.");
+			if (!await _controller.PrepareStartupChatAndDismissReplyKeyboardAsync(_currentBotUsername)) throw new InvalidOperationException("Startup chat focus/Escape verification failed.");
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
 			_initializedForNextLoop = true;

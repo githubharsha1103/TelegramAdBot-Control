@@ -269,7 +269,7 @@ public class TelegramController : IAsyncDisposable
 		await TryNavigateToBotChatAsync(botUsername);
 	}
 
-	public async Task<bool> TryNavigateToBotChatAsync(string botUsername)
+	public async Task<bool> TryNavigateToBotChatAsync(string botUsername, bool waitAfterEnter = true)
 	{
 		try
 		{
@@ -342,7 +342,7 @@ public class TelegramController : IAsyncDisposable
 			await _page.Keyboard.PressAsync("Enter");
 			await BrowserDiagnosticAsync("Bot search submitted Enter", "after");
 			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-			await Task.Delay(2000);
+			if (waitAfterEnter) await Task.Delay(2000);
 			await BrowserDiagnosticAsync($"Bot search completed @{clean}; expected chat list visible", "after");
 			await BrowserDiagnosticAsync($"Bot conversation entered @{clean}; expected chat list visible", "after", screenshot: true);
 			Logger.Success("Opened @" + clean, _instanceId);
@@ -371,6 +371,45 @@ public class TelegramController : IAsyncDisposable
 		catch (Exception ex)
 		{
 			Logger.Warning("[Chat] Could not dismiss reply keyboard: " + ex.Message, _instanceId);
+			return false;
+		}
+	}
+
+	public async Task<bool> PrepareStartupChatAndDismissReplyKeyboardAsync(string botUsername)
+	{
+		ILocator? messageInput = null;
+		string urlBeforeEscape = "<unavailable>";
+		try
+		{
+			if (_page == null || _page.IsClosed) return false;
+			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Waiting exactly 3 seconds for @{botUsername} conversation.", _instanceId);
+			await Task.Delay(TimeSpan.FromSeconds(3));
+			await _page.BringToFrontAsync();
+			messageInput = _page.Locator(".input-message-input[contenteditable='true']");
+			await messageInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+			urlBeforeEscape = _page.Url;
+			await BrowserDiagnosticAsync($"Startup bot conversation @{botUsername} active; message input visible", "before-focus", screenshot: true);
+			await messageInput.FocusAsync();
+			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Focused message input; waiting exactly 2 seconds before Escape.", _instanceId);
+			await Task.Delay(TimeSpan.FromSeconds(2));
+			if (!await messageInput.EvaluateAsync<bool>("element => document.activeElement === element"))
+				throw new InvalidOperationException("Telegram message input lost focus during the required 2-second wait.");
+			await _page.Keyboard.PressAsync("Escape");
+			await BrowserDiagnosticAsync("Startup Escape pressed", "after", screenshot: true);
+			bool conversationStillOpen = !_page.IsClosed && _page.Url == urlBeforeEscape && messageInput != null && await messageInput.IsVisibleAsync();
+			if (!conversationStillOpen)
+			{
+				await BrowserDiagnosticAsync($"Startup Escape changed or closed @{botUsername} conversation; startup halted", "failure", screenshot: true);
+				Logger.Error($"[StartupDiag] Escape closed or changed the @{botUsername} conversation. Startup halted; no recovery click will be attempted.", _instanceId);
+				return false;
+			}
+			Logger.Success($"[StartupDiag] Escape completed; @{botUsername} conversation remains open.", _instanceId);
+			return true;
+		}
+		catch (Exception ex)
+		{
+			await BrowserDiagnosticAsync($"Startup chat verification/dismissal failed for @{botUsername}: {ex.Message}", "failure", screenshot: true);
+			Logger.Error($"[StartupDiag] Startup Escape sequence failed for @{botUsername}: {ex.Message}", _instanceId);
 			return false;
 		}
 	}
