@@ -193,8 +193,10 @@ public class BotEngine
 			}
 			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
 			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
+			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Startup 5-second wait started.", _instanceId);
 			await Task.Delay(TimeSpan.FromSeconds(5));
-			if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat and dismiss its reply keyboard.");
+			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Startup 5-second wait completed.", _instanceId);
+			if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape during startup reply-keyboard dismissal.");
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
 			_initializedForNextLoop = true;
@@ -281,35 +283,40 @@ public class BotEngine
 	{
 		if (_controller == null) return false;
 		Logger.Step($"Preparing chat: waiting {_config.WaitAfterNavigate}ms...", _instanceId);
+		Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Configured chat preparation wait {_config.WaitAfterNavigate}ms started.", _instanceId);
 		try
 		{
 			await Task.Delay(_config.WaitAfterNavigate, ct);
+			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Configured chat preparation wait completed.", _instanceId);
 		}
 		catch
 		{
 			return false;
 		}
 		Logger.Step("auto-click EMOJI button", _instanceId);
-		if (!await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY)) return false;
+		if (!await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY, "Sticker icon / emoji button", captureScreenshots: true)) return false;
 		try
 		{
 			await Task.Delay(_config.WaitAfterEmojiButton, ct);
+			await LogCycleWaitAsync("Sticker icon", _config.WaitAfterEmojiButton);
 		}
 		catch
 		{
 			return false;
 		}
 		Logger.Step("auto-click STICKER tab", _instanceId);
-		if (!await _controller.ClickAsync(_config.StickerTabX, _config.StickerTabY)) return false;
+		if (!await _controller.ClickAsync(_config.StickerTabX, _config.StickerTabY, "Sticker tab", captureScreenshots: true)) return false;
 		try
 		{
 			await Task.Delay(_config.WaitAfterStickerTab, ct);
+			await LogCycleWaitAsync("Sticker tab", _config.WaitAfterStickerTab);
 		}
 		catch
 		{
 			return false;
 		}
 		Logger.Success("Chat ready for cycling.", _instanceId);
+		Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Sticker configuration completed.", _instanceId);
 		return true;
 	}
 
@@ -368,50 +375,63 @@ public class BotEngine
 				_totalCycles++;
 				_cyclesOnCurrentBot++;
 				Logger.Cycle(_totalCycles, _instanceId, _cyclesOnCurrentBot, _config.CyclesPerBot, _currentBotUsername, _currentBotIndex + 1, _config.BotList.Count);
+				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Cycle {_cyclesOnCurrentBot} started.", _instanceId);
 				if (firstCycle)
 				{
-					await _controller.ClickAsync(_config.TextboxX, _config.TextboxY);
+					await _controller.ClickAsync(_config.TextboxX, _config.TextboxY, "Initial cycle chat textbox");
 					await Task.Delay(200, ct);
 					firstCycle = false;
 				}
 				Logger.Step("/search", _instanceId);
 				await _controller.TypeAsync("/search");
 				await _controller.PressEnterAsync();
+				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Search command sent; configured wait {_config.WaitAfterSearch}ms started.", _instanceId);
 				if (!(await Wait(_config.WaitAfterSearch, ct)))
 				{
 					break;
 				}
-				if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat after partner search.");
+				await LogCycleWaitAsync("Search command", _config.WaitAfterSearch);
+				if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape after partner search.");
+				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Escape pressed after search.", _instanceId);
 				await Task.Delay(1000, ct);
 				Logger.Step("emoji button click", _instanceId);
-				await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY);
+				await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY, "Cycle sticker icon / emoji button", captureScreenshots: _completedCycles == 0);
 				if (!(await Wait(_config.WaitAfterEmojiClick, ct)))
 				{
 					break;
 				}
+				await LogCycleWaitAsync("Sticker icon", _config.WaitAfterEmojiClick);
 				Logger.Step("sticker click", _instanceId);
-				await _controller.ClickAsync(_config.StickerX, _config.StickerY);
+				await _controller.ClickAsync(_config.StickerX, _config.StickerY, "Promotional sticker selection", captureScreenshots: _completedCycles == 0);
+				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Sticker selection click completed; sticker sent if Telegram accepted it.", _instanceId);
 				if (!(await Wait(_config.WaitAfterSticker, ct)))
 				{
 					break;
 				}
-				await _controller.ClickAsync(_config.TextboxX, _config.TextboxY);
+				await LogCycleWaitAsync("Sticker selection", _config.WaitAfterSticker);
+				await _controller.ClickAsync(_config.TextboxX, _config.TextboxY, "Promotion message textbox");
 				await Task.Delay(200, ct);
 				string promo = _config.PromoMessages[_promoIndex % _config.PromoMessages.Length];
 				_promoIndex++;
 				Logger.Step($"promo [{_promoIndex}]: {promo}", _instanceId);
 				await _controller.TypeAsync(promo);
 				await _controller.PressEnterAsync();
+				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Promotional message sent; configured wait {_config.WaitAfterPromo}ms.", _instanceId);
 				if (await Wait(_config.WaitAfterPromo, ct))
 				{
+					await LogCycleWaitAsync("Promotional message", _config.WaitAfterPromo);
 					Logger.Step("/stop", _instanceId);
 					await _controller.TypeAsync("/stop");
 					await _controller.PressEnterAsync();
+					Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | /stop command sent; configured wait {_config.WaitAfterStop}ms.", _instanceId);
 					if (await Wait(_config.WaitAfterStop, ct))
 					{
-						if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat after /stop.");
+						await LogCycleWaitAsync("/stop command", _config.WaitAfterStop);
+						if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape after /stop.");
+						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Escape pressed after /stop; cycle completed.", _instanceId);
 						_completedCycles++;
 						Logger.Success($"Cycle {_cyclesOnCurrentBot}/{_config.CyclesPerBot} done on @{_currentBotUsername}", _instanceId);
+						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Next cycle will start if configured cycles remain.", _instanceId);
 						continue;
 					}
 				}
@@ -532,5 +552,11 @@ public class BotEngine
 			}
 		}
 		return true;
+	}
+
+	private Task LogCycleWaitAsync(string action, int configuredMs)
+	{
+		Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | {action} configured wait completed ({configuredMs}ms).", _instanceId);
+		return Task.CompletedTask;
 	}
 }

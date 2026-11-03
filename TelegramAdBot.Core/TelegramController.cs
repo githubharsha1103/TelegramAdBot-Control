@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Playwright;
@@ -35,6 +36,35 @@ public class TelegramController : IAsyncDisposable
 		_instanceId = instanceId;
 	}
 
+	private async Task BrowserDiagnosticAsync(string action, string stage, bool screenshot = false)
+	{
+		try
+		{
+			string url = _page == null || _page.IsClosed ? "<unavailable>" : _page.Url;
+			string focus = "<unavailable>";
+			string chatVisible = "unknown";
+			if (_page != null && !_page.IsClosed)
+			{
+				focus = await _page.EvaluateAsync<string>("() => { const e=document.activeElement; return JSON.stringify({pageHasFocus:document.hasFocus(),active:e?{tag:e.tagName,id:e.id||'',className:typeof e.className==='string'?e.className:'',name:e.getAttribute('aria-label')||e.getAttribute('title')||e.innerText||e.getAttribute('placeholder')||''}:null}); }");
+				chatVisible = await _page.Locator(SEL_CHAT_LIST).First.IsVisibleAsync() ? "visible" : "not-visible";
+			}
+			string stamp = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz");
+			Logger.Info($"[BrowserDiag] {stamp} | {action} | {stage} | URL={url} | active={focus} | chatList={chatVisible}", _instanceId);
+			if (screenshot && _page != null && !_page.IsClosed)
+			{
+				Directory.CreateDirectory(AppDataPaths.LogsFolder);
+				string safe = string.Concat(action.Select(c => char.IsLetterOrDigit(c) ? c : '_'));
+				string path = Path.Combine(AppDataPaths.LogsFolder, $"browser_{_instanceId}_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{safe}_{stage}.png");
+				await _page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = false });
+				Logger.Info($"[BrowserDiag] Screenshot {stage}: {path}", _instanceId);
+			}
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning($"[BrowserDiag] Diagnostic capture failed for {action} ({stage}): {ex.Message}", _instanceId);
+		}
+	}
+
 	public async Task<bool> InitializeAsync()
 	{
 		_ = 3;
@@ -53,6 +83,7 @@ public class TelegramController : IAsyncDisposable
 			int yPos = 50 + (((_instanceId - 1) / 10) % 10) * 60;
 			Logger.Step("Using Chromium: " + chromiumPath, _instanceId);
 			Logger.Step($"Launching Chromium ({_config.BrowserWidth}x{_config.BrowserHeight})...", _instanceId);
+			await BrowserDiagnosticAsync("Browser launch", "before");
 			_context = await _playwright.Chromium.LaunchPersistentContextAsync(sessionDir, new BrowserTypeLaunchPersistentContextOptions
 			{
 				Headless = _config.Headless,
@@ -83,6 +114,7 @@ public class TelegramController : IAsyncDisposable
 			IReadOnlyList<IPage> pages = _context.Pages;
 			IPage page = ((pages.Count <= 0) ? (await _context.NewPageAsync()) : pages[0]);
 			_page = page;
+			await BrowserDiagnosticAsync("Browser launched", "after");
 			Logger.Step("Loading Telegram Web...", _instanceId);
 			await _page.GotoAsync(_config.TelegramWebUrl, new PageGotoOptions
 			{
@@ -90,6 +122,7 @@ public class TelegramController : IAsyncDisposable
 				Timeout = 30000f
 			});
 			Logger.Info("[Browser] Telegram Web navigation completed.", _instanceId);
+			await BrowserDiagnosticAsync("Telegram opened", "after", screenshot: true);
 			Logger.Info("[Browser] Waiting 5 seconds for Telegram Web.", _instanceId);
 			await Task.Delay(TimeSpan.FromSeconds(5));
 			Logger.Success("[Browser] Telegram Web startup wait completed.", _instanceId);
@@ -246,6 +279,7 @@ public class TelegramController : IAsyncDisposable
 			}
 			string clean = botUsername.TrimStart('@');
 			Logger.Step("Opening chat: @" + clean, _instanceId);
+			await BrowserDiagnosticAsync($"Bot search started @{clean}", "before");
 			try
 			{
 				if (!_page.Url.Contains("web.telegram.org"))
@@ -272,13 +306,19 @@ public class TelegramController : IAsyncDisposable
 				}
 				if (flag)
 				{
+					await BrowserDiagnosticAsync("Bot search input click locator=input[type='text']", "before");
 					await searchInput.ClickAsync(new ElementHandleClickOptions
 					{
 						Timeout = 5000f
 					});
+					await BrowserDiagnosticAsync("Bot search input click locator=input[type='text']", "after");
+					await BrowserDiagnosticAsync("Bot search select all Control+a", "before");
 					await _page.Keyboard.PressAsync("Control+a");
+					await BrowserDiagnosticAsync("Bot search select all Control+a", "after");
 					await Task.Delay(100);
+					await BrowserDiagnosticAsync("Bot search clear Delete", "before");
 					await _page.Keyboard.PressAsync("Delete");
+					await BrowserDiagnosticAsync("Bot search clear Delete", "after");
 					await Task.Delay(200);
 					searchClicked = true;
 				}
@@ -291,14 +331,20 @@ public class TelegramController : IAsyncDisposable
 			{
 				Logger.Warning("Search not found — falling back to keyboard shortcut.", _instanceId);
 			}
+			await BrowserDiagnosticAsync($"Bot search text typed t.me/{clean}", "before");
 			await _page.Keyboard.TypeAsync("t.me/" + clean, new KeyboardTypeOptions
 			{
 				Delay = 50f
 			});
+			await BrowserDiagnosticAsync($"Bot search text typed t.me/{clean}", "after");
 			await Task.Delay(500);
+			await BrowserDiagnosticAsync("Bot search submitted Enter", "before");
 			await _page.Keyboard.PressAsync("Enter");
+			await BrowserDiagnosticAsync("Bot search submitted Enter", "after");
 			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
 			await Task.Delay(2000);
+			await BrowserDiagnosticAsync($"Bot search completed @{clean}; expected chat list visible", "after");
+			await BrowserDiagnosticAsync($"Bot conversation entered @{clean}; expected chat list visible", "after", screenshot: true);
 			Logger.Success("Opened @" + clean, _instanceId);
 			return true;
 		}
@@ -316,8 +362,9 @@ public class TelegramController : IAsyncDisposable
 			if (_page == null || _page.IsClosed) return false;
 			await _page.BringToFrontAsync();
 			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
-			await _page.Mouse.ClickAsync(_config.TextboxX, _config.TextboxY);
+			await BrowserDiagnosticAsync("Escape", "before");
 			await _page.Keyboard.PressAsync("Escape");
+			await BrowserDiagnosticAsync("Escape pressed", "after", screenshot: true);
 			Logger.Info("[Chat] Reply keyboard dismissal attempted with Escape.", _instanceId);
 			return true;
 		}
@@ -353,12 +400,16 @@ public class TelegramController : IAsyncDisposable
 			if (_page == null || _page.IsClosed) throw new InvalidOperationException("Telegram page is unavailable.");
 			Logger.Info($"[AccountSwitch] Switching to Account {accountNumber}.", _instanceId);
 			Logger.Info($"[AccountSwitch] Opening account menu at X={_config.AccountMenuX} Y={_config.AccountMenuY}.", _instanceId);
+			await BrowserDiagnosticAsync($"Account menu click ({_config.AccountMenuX},{_config.AccountMenuY})", "before", screenshot: true);
 			await _page.Mouse.ClickAsync(_config.AccountMenuX, _config.AccountMenuY);
+			await BrowserDiagnosticAsync($"Account menu click ({_config.AccountMenuX},{_config.AccountMenuY})", "after", screenshot: true);
 			Logger.Info("[AccountSwitch] Account menu click completed.", _instanceId);
 			Logger.Info("[AccountSwitch] Waiting for account menu to open.", _instanceId);
 			await Task.Delay(750);
 			Logger.Info($"[AccountSwitch] Clicking Account {accountNumber} at X={x} Y={y}.", _instanceId);
+			await BrowserDiagnosticAsync($"Account {accountNumber} click ({x},{y})", "before", screenshot: true);
 			await _page.Mouse.ClickAsync(x, y);
+			await BrowserDiagnosticAsync($"Account {accountNumber} click ({x},{y})", "after", screenshot: true);
 			Logger.Info($"[AccountSwitch] Account {accountNumber} click completed.", _instanceId);
 			Logger.Info("[AccountSwitch] Waiting 5 seconds for Telegram account switch.", _instanceId);
 			await Task.Delay(TimeSpan.FromSeconds(5));
@@ -417,7 +468,7 @@ public class TelegramController : IAsyncDisposable
 		}
 	}
 
-	public async Task<bool> ClickAsync(int x, int y)
+	public async Task<bool> ClickAsync(int x, int y, string action = "Mouse click", bool captureScreenshots = false)
 	{
 		try
 		{
@@ -425,7 +476,9 @@ public class TelegramController : IAsyncDisposable
 			{
 				return false;
 			}
+			await BrowserDiagnosticAsync($"{action} coordinates=({x},{y})", "before", screenshot: captureScreenshots);
 			await _page.Mouse.ClickAsync(x, y);
+			await BrowserDiagnosticAsync($"{action} coordinates=({x},{y})", "after", screenshot: captureScreenshots);
 			return true;
 		}
 		catch (Exception ex)
@@ -443,10 +496,12 @@ public class TelegramController : IAsyncDisposable
 			{
 				return false;
 			}
+			await BrowserDiagnosticAsync($"Keyboard type text={text}", "before");
 			await _page.Keyboard.TypeAsync(text, new KeyboardTypeOptions
 			{
 				Delay = _config.TypeDelayMs
 			});
+			await BrowserDiagnosticAsync($"Keyboard type text={text}", "after");
 			return true;
 		}
 		catch (Exception ex)
@@ -464,7 +519,9 @@ public class TelegramController : IAsyncDisposable
 			{
 				return false;
 			}
+			await BrowserDiagnosticAsync("Keyboard Enter", "before");
 			await _page.Keyboard.PressAsync("Enter");
+			await BrowserDiagnosticAsync("Keyboard Enter", "after");
 			return true;
 		}
 		catch (Exception ex)
