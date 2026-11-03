@@ -193,7 +193,7 @@ public class BotEngine
 			}
 			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
 			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
-			await Task.Delay(TimeSpan.FromSeconds(3));
+			await Task.Delay(TimeSpan.FromSeconds(5));
 			if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not focus the bot chat and dismiss its reply keyboard.");
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
