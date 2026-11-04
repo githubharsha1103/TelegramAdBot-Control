@@ -15,8 +15,6 @@ public static class AppDataPaths
 
 	public static string BotConfigFile => Path.Combine(Root, "bots.json");
 
-	public static string GlobalMenuButtonPositionFile => Path.Combine(Root, "menu_button_positions.json");
-
 	public static string ManualInstancesFile => Path.Combine(Root, "manual_instances.json");
 
 	public static string SetupFlagFile => Path.Combine(Root, "setup_done.flag");
@@ -29,7 +27,15 @@ public static class AppDataPaths
 
 	public static string ProfilePath(int instanceId)
 	{
-		return Path.Combine(ProfilesFolder, $"profile_{instanceId}");
+		return ProfilePath(instanceId, "https://web.telegram.org/a/");
+	}
+
+	public static string ProfilePath(int instanceId, string telegramWebUrl)
+	{
+		bool isWebA = Uri.TryCreate(telegramWebUrl, UriKind.Absolute, out Uri? uri) &&
+			uri.Host.Equals("web.telegram.org", StringComparison.OrdinalIgnoreCase) &&
+			uri.AbsolutePath.TrimEnd('/').EndsWith("/a", StringComparison.OrdinalIgnoreCase);
+		return Path.Combine(ProfilesFolder, isWebA ? $"profile_{instanceId}_webA" : $"profile_{instanceId}");
 	}
 
 	public static void EnsureDirectories()

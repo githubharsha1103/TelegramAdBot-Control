@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -7,7 +7,6 @@ using TelegramAdBot.Helpers;
 using TelegramAdBot.Models;
 
 namespace TelegramAdBot.Core;
-
 
 public class BotEngine
 {
@@ -24,8 +23,6 @@ public class BotEngine
 	private volatile bool _running;
 
 	private volatile bool _paused;
-
-	private volatile bool _recoveryBlocked;
 
 	private volatile bool _finished;
 	private volatile bool _failed;
@@ -48,11 +45,6 @@ public class BotEngine
 
 	private int _promoIndex;
 
-	private bool _stopDeliveredForCurrentCycle;
-	private readonly MenuClosePositionStore _menuButtonPositions = new();
-	private readonly Dictionary<string, TelegramController.ReplyKeyboardMenuState> _menuStateByBot = new(StringComparer.OrdinalIgnoreCase);
-	private string _menuConfigurationError = "";
-
 	private string _currentBotUsername = "";
 
 	public int InstanceId => _instanceId;
@@ -74,7 +66,6 @@ public class BotEngine
 	public int CyclesOnCurrentBot => _cyclesOnCurrentBot;
 
 	public int CompletedCycles => _completedCycles;
-	public string MenuConfigurationError => _menuConfigurationError;
 	public int CurrentAccount => _currentAccount;
 	public int SelectedAccountIndex => _selectedAccountIndex;
 	public int SelectedAccountCount => _selectedAccounts.Count;
@@ -83,7 +74,6 @@ public class BotEngine
 	public string AccountState => _accountSwitching ? $"🔄 Switching to Account {_selectedAccounts.ElementAtOrDefault(_selectedAccountIndex + 1)}..." : _initializing ? $"⚙️ Initializing Account {_currentAccount}..." : _running ? $"🚀 Account {_currentAccount} promotion running..." : IsFinished ? "All selected accounts complete" : "";
 
 	public string CurrentBotUsername => _currentBotUsername;
-
 	public void ConfigureAccounts(IReadOnlyList<int> accounts) => _selectedAccounts = accounts;
 	public void SetSelectedAccountIndex(int index) { _selectedAccountIndex = index; if (index >= 0 && index < _selectedAccounts.Count) _currentAccount = _selectedAccounts[index]; }
 	public void MarkAccountInitializedAtBoundary() { _accountInitializedAtBoundary = true; _initializedForNextLoop = false; }
@@ -146,16 +136,15 @@ public class BotEngine
 			Logger.Error("Login failed.", _instanceId);
 			return false;
 		}
-		await _controller.StartMenuButtonPointerTrackingAsync();
 		Logger.Success("[Browser] Telegram UI ready.", _instanceId);
 		Logger.Success($"Browser {_instanceId} ready (not navigated yet).", _instanceId);
 		return true;
 	}
 
-	public async Task<bool> NavigateToFirstBotAsync(bool startup = false)
+	public async Task<bool> NavigateToFirstBotAsync()
 	{
 		if (_controller == null) return false;
-		bool success = await _controller.TryNavigateToBotChatAsync(_currentBotUsername, waitAfterEnter: !startup);
+		bool success = await _controller.TryNavigateToBotChatAsync(_currentBotUsername);
 		if (success) Logger.Success($"Ready on @{_currentBotUsername} (1/{_config.BotList.Count})", _instanceId);
 		return success;
 	}
@@ -199,14 +188,12 @@ public class BotEngine
 			{
 				Logger.Info($"[Bot] Searching/opening @{_currentBotUsername} (attempt {attempt}/3).", _instanceId);
 				if (attempt > 1) Logger.Warning($"[PromotionInit] Retrying bot search/navigation ({attempt}/3) for @{_currentBotUsername}.", _instanceId);
-				navigationCompleted = await NavigateToFirstBotAsync(startup: true);
+				navigationCompleted = await NavigateToFirstBotAsync();
 				if (!navigationCompleted && attempt < 3) await Task.Delay(1000);
 			}
 			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
-			MenuClosePositions startupMenuPositions = _menuButtonPositions.Load();
-			Logger.Info($"[Menu] Out-of-chat F8={(startupMenuPositions.OutOfChatMenuClosePosition.Configured ? "configured" : "missing")}, in-chat F9={(startupMenuPositions.InChatMenuClosePosition.Configured ? "configured" : "missing")}.", _instanceId);
-			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
 			if (!await _controller.VerifyStartupChatAndFocusMessageInputAsync(_currentBotUsername)) throw new InvalidOperationException("Startup chat/input verification failed.");
+			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
 			_initializedForNextLoop = true;
@@ -231,11 +218,6 @@ public class BotEngine
 		}
 		if (_running && _paused)
 		{
-			if (_recoveryBlocked)
-			{
-				Logger.Warning("Resume refused: conversation recovery is blocked pending verification.", _instanceId);
-				return Task.FromResult(result: false);
-			}
 			_paused = false;
 			Logger.Success("RESUMED.", _instanceId);
 			return Task.FromResult(result: true);
@@ -264,21 +246,12 @@ public class BotEngine
 		if (IsBrowserAlive) { _paused = true; Logger.Warning("PAUSED.", _instanceId); }
 	}
 
-	public void ResumePause()
-	{
-		if (_recoveryBlocked)
-		{
-			Logger.Warning("Resume refused: conversation recovery is blocked pending verification.", _instanceId);
-			return;
-		}
-		_paused = false;
-	}
+	public void ResumePause() => _paused = false;
 
 	public async Task FullStopAsync()
 	{
 		_running = false;
 		_paused = false;
-		_recoveryBlocked = false;
 		_cts?.Cancel();
 		Exception? cleanupError = null;
 		try { await CloseControllerAsync(); }
@@ -303,46 +276,39 @@ public class BotEngine
 		Logger.Warning("STOPPED.", _instanceId);
 	}
 
-	private async Task<bool> PrepareBotForCyclingAsync(CancellationToken ct, bool verifyStickerPickerReady = false, bool ensureMenuClosed = false)
+	private async Task<bool> PrepareBotForCyclingAsync(CancellationToken ct)
 	{
 		if (_controller == null) return false;
 		Logger.Step($"Preparing chat: waiting {_config.WaitAfterNavigate}ms...", _instanceId);
-		Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Configured chat preparation wait {_config.WaitAfterNavigate}ms started.", _instanceId);
 		try
 		{
 			await Task.Delay(_config.WaitAfterNavigate, ct);
-			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Configured chat preparation wait completed.", _instanceId);
 		}
 		catch
 		{
 			return false;
 		}
-		if (ensureMenuClosed && !await TryCollapseReplyKeyboardAsync(_currentBotUsername)) return false;
 		Logger.Step("auto-click EMOJI button", _instanceId);
-		if (!await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY, "Sticker icon / emoji button", captureScreenshots: true)) return false;
+		if (!await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY)) return false;
 		try
 		{
 			await Task.Delay(_config.WaitAfterEmojiButton, ct);
-			await LogCycleWaitAsync("Sticker icon", _config.WaitAfterEmojiButton);
 		}
 		catch
 		{
 			return false;
 		}
 		Logger.Step("auto-click STICKER tab", _instanceId);
-		if (!await _controller.ClickAsync(_config.StickerTabX, _config.StickerTabY, "Sticker tab", captureScreenshots: true)) return false;
+		if (!await _controller.ClickAsync(_config.StickerTabX, _config.StickerTabY)) return false;
 		try
 		{
 			await Task.Delay(_config.WaitAfterStickerTab, ct);
-			await LogCycleWaitAsync("Sticker tab", _config.WaitAfterStickerTab);
 		}
 		catch
 		{
 			return false;
 		}
 		Logger.Success("Chat ready for cycling.", _instanceId);
-		Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Sticker configuration completed.", _instanceId);
-		if (verifyStickerPickerReady && !await _controller.VerifyStickerPickerReadyAsync()) return false;
 		return true;
 	}
 
@@ -388,7 +354,7 @@ public class BotEngine
 				}
 				if (await SwitchToNextBotAsync(ct))
 				{
-					if (!_accountInitializedAtBoundary && !await PrepareBotForCyclingAsync(ct, ensureMenuClosed: true)) { _finished = true; _running = false; break; }
+					if (!_accountInitializedAtBoundary && !await PrepareBotForCyclingAsync(ct)) { _finished = true; _running = false; break; }
 					_accountInitializedAtBoundary = false;
 					if (!ct.IsCancellationRequested)
 					{
@@ -400,80 +366,48 @@ public class BotEngine
 				IL_03aa:
 				_totalCycles++;
 				_cyclesOnCurrentBot++;
-				_stopDeliveredForCurrentCycle = false;
 				Logger.Cycle(_totalCycles, _instanceId, _cyclesOnCurrentBot, _config.CyclesPerBot, _currentBotUsername, _currentBotIndex + 1, _config.BotList.Count);
-				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Cycle {_cyclesOnCurrentBot} started.", _instanceId);
 				if (firstCycle)
 				{
-					await _controller.ClickAsync(_config.TextboxX, _config.TextboxY, "Initial cycle chat textbox");
+					await _controller.ClickAsync(_config.TextboxX, _config.TextboxY);
 					await Task.Delay(200, ct);
 					firstCycle = false;
 				}
 				Logger.Step("/search", _instanceId);
 				await _controller.TypeAsync("/search");
 				await _controller.PressEnterAsync();
-				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Search command sent; configured wait {_config.WaitAfterSearch}ms started.", _instanceId);
 				if (!(await Wait(_config.WaitAfterSearch, ct)))
 				{
 					break;
 				}
-				await LogCycleWaitAsync("Search command", _config.WaitAfterSearch);
-				await Task.Delay(1000, ct);
-				if (!await EnsureMenuStateWithPauseAsync(_currentBotUsername, TelegramController.ReplyKeyboardMenuState.Closed, ct)) break;
-				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Telegram menu button confirmed closed after search.", _instanceId);
-				await Task.Delay(1000, ct);
 				Logger.Step("emoji button click", _instanceId);
-				await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY, "Cycle sticker icon / emoji button", captureScreenshots: _completedCycles == 0);
+				await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY);
 				if (!(await Wait(_config.WaitAfterEmojiClick, ct)))
 				{
 					break;
 				}
-				await LogCycleWaitAsync("Sticker icon", _config.WaitAfterEmojiClick);
 				Logger.Step("sticker click", _instanceId);
-				await _controller.ClickAsync(_config.StickerX, _config.StickerY, "Promotional sticker selection", captureScreenshots: _completedCycles == 0);
-				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Sticker selection click completed; sticker sent if Telegram accepted it.", _instanceId);
+				await _controller.ClickAsync(_config.StickerX, _config.StickerY);
 				if (!(await Wait(_config.WaitAfterSticker, ct)))
 				{
 					break;
 				}
-				await LogCycleWaitAsync("Sticker selection", _config.WaitAfterSticker);
-				await _controller.ClickAsync(_config.TextboxX, _config.TextboxY, "Promotion message textbox");
+				await _controller.ClickAsync(_config.TextboxX, _config.TextboxY);
 				await Task.Delay(200, ct);
 				string promo = _config.PromoMessages[_promoIndex % _config.PromoMessages.Length];
 				_promoIndex++;
 				Logger.Step($"promo [{_promoIndex}]: {promo}", _instanceId);
 				await _controller.TypeAsync(promo);
 				await _controller.PressEnterAsync();
-				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Promotional message sent; configured wait {_config.WaitAfterPromo}ms.", _instanceId);
 				if (await Wait(_config.WaitAfterPromo, ct))
 				{
-					await LogCycleWaitAsync("Promotional message", _config.WaitAfterPromo);
 					Logger.Step("/stop", _instanceId);
-					bool stopTyped = await _controller.TypeAsync("/stop");
-					bool stopSubmitted = stopTyped && await _controller.PressEnterAsync();
-					if (!stopSubmitted)
-					{
-						string reason = $"Cycle {_cyclesOnCurrentBot}: /stop delivery is uncertain; automation remains paused to avoid resending it.";
-						_paused = true;
-						_recoveryBlocked = true;
-						Logger.Error($"[Recovery] Promotion paused. {reason}", _instanceId);
-						await _controller.CaptureRecoveryFailureAsync(reason);
-						continue;
-					}
-					_stopDeliveredForCurrentCycle = true;
-					Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | /stop command sent; configured wait {_config.WaitAfterStop}ms.", _instanceId);
+					await _controller.TypeAsync("/stop");
+					await _controller.PressEnterAsync();
 					if (await Wait(_config.WaitAfterStop, ct))
 					{
-						await LogCycleWaitAsync("/stop command", _config.WaitAfterStop);
-						await Task.Delay(1000, ct);
-						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Existing post-/stop wait completed; checking conversation URL.", _instanceId);
 						_completedCycles++;
 						Logger.Success($"Cycle {_cyclesOnCurrentBot}/{_config.CyclesPerBot} done on @{_currentBotUsername}", _instanceId);
-						if (_controller != null && !await _controller.VerifyExpectedBotConversationAsync(_currentBotUsername, requireMessageInput: false))
-						{
-							await RecoverConversationAfterStopAsync(_cyclesOnCurrentBot, ct);
-						}
-						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Next cycle will start if configured cycles remain.", _instanceId);
 						continue;
 					}
 				}
@@ -564,146 +498,6 @@ public class BotEngine
 		return true;
 	}
 
-	private async Task<bool> RecoverConversationAfterStopAsync(int completedCycle, CancellationToken ct)
-	{
-		if (_controller == null) return false;
-		_paused = true;
-		_recoveryBlocked = true;
-		Logger.Warning($"[Recovery] Conversation navigation loss detected after cycle {completedCycle}; last completed action was /stop and its existing post-stop action. Promotion paused.", _instanceId);
-		Logger.Info($"[Recovery] Recovery navigation started for @{_currentBotUsername}.", _instanceId);
-		string failureStage = "bot navigation";
-		string failure = "Conversation recovery could not be completed.";
-		try
-		{
-			if (!await _controller.TryNavigateToBotChatAsync(_currentBotUsername))
-			{
-				failure = $"Could not navigate back to @{_currentBotUsername}.";
-			}
-			else if (!await _controller.VerifyExpectedBotConversationAsync(_currentBotUsername, requireMessageInput: true))
-			{
-				failureStage = "URL or message input verification";
-				failure = $"Recovered navigation did not verify the expected conversation and message input for @{_currentBotUsername}.";
-			}
-			else if (!await PrepareBotForCyclingAsync(ct, verifyStickerPickerReady: true, ensureMenuClosed: true))
-			{
-				failureStage = "menu or sticker setup initialization";
-				failure = $"Menu and sticker setup did not complete for cycle {completedCycle}.";
-			}
-			else if (!_stopDeliveredForCurrentCycle && !await SubmitStopOnceDuringRecoveryAsync(completedCycle))
-			{
-				failureStage = "/stop submission";
-				failure = $"Recovery could not verify /stop submission for cycle {completedCycle}; it will not be retried.";
-			}
-			else
-			{
-				Logger.Success($"[Recovery] Expected conversation restored after cycle {completedCycle}: @{_currentBotUsername}.", _instanceId);
-				_recoveryBlocked = false;
-				_paused = false;
-				Logger.Success($"[Recovery] Promotion resumed at cycle {completedCycle + 1}.", _instanceId);
-				return true;
-			}
-		}
-		catch (OperationCanceledException) when (ct.IsCancellationRequested)
-		{
-			failure = "Conversation recovery was cancelled during shutdown.";
-		}
-		catch (Exception ex)
-		{
-			failure = ex.Message;
-		}
-		Logger.Error($"[Recovery] Recovery failed at stage '{failureStage}' after cycle {completedCycle}; promotion remains paused. {failure}", _instanceId);
-		await _controller.CaptureRecoveryFailureAsync($"cycle {completedCycle}, stage {failureStage}: {failure}");
-		return false;
-	}
-
-	private async Task<bool> EnsureMenuStateWithPauseAsync(string botUsername, TelegramController.ReplyKeyboardMenuState desiredState, CancellationToken ct)
-	{
-		while (!ct.IsCancellationRequested)
-		{
-			if (await TryCollapseReplyKeyboardAsync(botUsername)) return true;
-			_paused = true;
-			Logger.Error($"[Menu] @{botUsername} reply keyboard state is unknown or its F9 position is not configured. Promotion paused before any menu click; capture with F9, then resume.", _instanceId);
-			while (_paused && !ct.IsCancellationRequested) await Task.Delay(300, ct);
-		}
-		return false;
-	}
-
-	private async Task<bool> TryCollapseReplyKeyboardAsync(string botUsername)
-	{
-		if (_controller == null) return false;
-		MenuClosePositions positions = _menuButtonPositions.Load();
-		MenuCaptureTarget target = MenuCaptureTarget.InChat;
-		TelegramController.ReplyKeyboardMenuState desiredState = TelegramController.ReplyKeyboardMenuState.Closed;
-		MenuClosePosition saved = SelectMenuClosePosition(positions, target);
-		const string hotkey = "F9";
-		if (!saved.Configured)
-		{
-			_menuStateByBot[botUsername] = TelegramController.ReplyKeyboardMenuState.Unknown;
-			_menuConfigurationError = $"In-chat Reply Keyboard close position is not configured. Move the VNC cursor over its close button and press {hotkey}, then resume.";
-			Logger.Error("[Menu] " + _menuConfigurationError + " No click was attempted.", _instanceId);
-			return false;
-		}
-		if (saved.ViewportWidth <= 0 || saved.ViewportHeight <= 0 || saved.X < 0 || saved.Y < 0 || saved.X >= saved.ViewportWidth || saved.Y >= saved.ViewportHeight)
-		{
-			_menuStateByBot[botUsername] = TelegramController.ReplyKeyboardMenuState.Unknown;
-			_menuConfigurationError = $"Saved {hotkey} menu close coordinates are invalid; capture them again with {hotkey}.";
-			return false;
-		}
-		TelegramController.ReplyKeyboardMenuState current = await _controller.GetReplyKeyboardMenuStateAsync();
-		_menuStateByBot[botUsername] = current;
-		if (current == TelegramController.ReplyKeyboardMenuState.Unknown)
-		{
-			_menuConfigurationError = $"Telegram menu state is unknown for @{botUsername}; promotion is paused without clicking.";
-			return false;
-		}
-		if (current == desiredState) { _menuConfigurationError = ""; return true; }
-		(int width, int height)? viewport = await _controller.GetViewportSizeAsync();
-		if (!viewport.HasValue) { _menuConfigurationError = $"Could not read the browser viewport for @{botUsername}; promotion is paused."; return false; }
-        int x = ScaleMenuCoordinate(saved.X, saved.ViewportWidth, viewport.Value.width);
-        int y = ScaleMenuCoordinate(saved.Y, saved.ViewportHeight, viewport.Value.height);
-		if (x < 0 || y < 0 || x >= viewport.Value.width || y >= viewport.Value.height)
-		{
-			Logger.Error($"[Menu] Saved @{botUsername} coordinate scaled outside the current viewport: ({x},{y}) in {viewport.Value.width}x{viewport.Value.height}.", _instanceId);
-			_menuStateByBot[botUsername] = TelegramController.ReplyKeyboardMenuState.Unknown;
-			_menuConfigurationError = $"Saved {hotkey} menu close position is outside the browser viewport; capture it again with {hotkey}.";
-			return false;
-		}
-		if (!await _controller.SetReplyKeyboardMenuStateAsync(x, y, desiredState))
-		{
-			_menuStateByBot[botUsername] = TelegramController.ReplyKeyboardMenuState.Unknown;
-			_menuConfigurationError = "Telegram Reply Keyboard state could not be confirmed after one click; promotion is paused. No retry click was attempted.";
-			return false;
-		}
-		_menuStateByBot[botUsername] = desiredState;
-		_menuConfigurationError = "";
-		return true;
-	}
-
-	public static int ScaleMenuCoordinate(int coordinate, int capturedExtent, int currentExtent)
-	{
-		if (capturedExtent <= 0 || currentExtent <= 0 || coordinate < 0 || coordinate >= capturedExtent) return -1;
-		return (int)Math.Round(coordinate * (double)currentExtent / capturedExtent);
-	}
-
-	public static MenuClosePosition SelectMenuClosePosition(MenuClosePositions positions, MenuCaptureTarget target) =>
-		target == MenuCaptureTarget.OutOfChat ? positions.OutOfChatMenuClosePosition : positions.InChatMenuClosePosition;
-
-	private async Task<bool> SubmitStopOnceDuringRecoveryAsync(int cycleNumber)
-	{
-		if (_controller == null || _stopDeliveredForCurrentCycle) return _stopDeliveredForCurrentCycle;
-		Logger.Info($"[Recovery] Cycle {cycleNumber}: /stop was not recorded as delivered; submitting it once after sticker setup.", _instanceId);
-		bool typed = await _controller.TypeAsync("/stop");
-		bool submitted = typed && await _controller.PressEnterAsync();
-		if (!submitted)
-		{
-			Logger.Error($"[Recovery] Cycle {cycleNumber}: /stop delivery is uncertain; it will not be retried.", _instanceId);
-			return false;
-		}
-		_stopDeliveredForCurrentCycle = true;
-		Logger.Info($"[Recovery] Cycle {cycleNumber}: /stop submitted once during recovery.", _instanceId);
-		return true;
-	}
-
 	private async Task CloseControllerAsync()
 	{
 		TelegramController? controller = _controller;
@@ -734,11 +528,5 @@ public class BotEngine
 			}
 		}
 		return true;
-	}
-
-	private Task LogCycleWaitAsync(string action, int configuredMs)
-	{
-		Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | {action} configured wait completed ({configuredMs}ms).", _instanceId);
-		return Task.CompletedTask;
 	}
 }

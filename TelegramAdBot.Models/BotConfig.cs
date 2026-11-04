@@ -49,7 +49,7 @@ public class BotConfig
 
 	public string[] PromoMessages { get; set; } = new string[8] { "Join fast", "Join it", "This one is best", "Its completely free", "Highly recommended", "Try it now", "Best one here", "Don't miss this" };
 
-	public string TelegramWebUrl { get; set; } = "https://web.telegram.org/k/";
+	public string TelegramWebUrl { get; set; } = "https://web.telegram.org/a/";
 
 	public bool Headless { get; set; }
 

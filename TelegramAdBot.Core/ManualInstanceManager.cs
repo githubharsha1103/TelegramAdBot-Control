@@ -27,7 +27,7 @@ public sealed class ManualInstanceManager
 	public bool CanManage(int instanceId)
 	{
 		return GetRegisteredInstanceIds().Contains(instanceId) && IsRuntimeAvailable() &&
-			Directory.Exists(AppDataPaths.ProfilePath(instanceId));
+			Directory.Exists(AppDataPaths.ProfilePath(instanceId, _config.TelegramWebUrl));
 	}
 
 	private bool IsRuntimeAvailable()
@@ -45,7 +45,7 @@ public sealed class ManualInstanceManager
 			if (File.Exists(AppDataPaths.ManualInstancesFile))
 			{
 				int[]? saved = JsonSerializer.Deserialize<int[]>(File.ReadAllText(AppDataPaths.ManualInstancesFile));
-				if (saved != null) foreach (int id in saved) if (id >= 1 && id <= MaximumInstanceCount && Directory.Exists(AppDataPaths.ProfilePath(id))) ids.Add(id);
+				if (saved != null) foreach (int id in saved) if (id >= 1 && id <= MaximumInstanceCount && Directory.Exists(AppDataPaths.ProfilePath(id, _config.TelegramWebUrl))) ids.Add(id);
 			}
 		}
 		catch (Exception ex) { Logger.Warning("Could not read manual instance registry: " + ex.Message); }
@@ -59,7 +59,7 @@ public sealed class ManualInstanceManager
 					string name = Path.GetFileName(profileDirectory);
 					if (name.StartsWith("profile_", StringComparison.OrdinalIgnoreCase) &&
 						int.TryParse(name.Substring("profile_".Length), out int id) && id >= 1 && id <= MaximumInstanceCount &&
-						string.Equals(name, $"profile_{id}", StringComparison.OrdinalIgnoreCase)) ids.Add(id);
+						(string.Equals(name, $"profile_{id}", StringComparison.OrdinalIgnoreCase) || string.Equals(name, $"profile_{id}_webA", StringComparison.OrdinalIgnoreCase))) ids.Add(id);
 				}
 			}
 		}
@@ -82,7 +82,7 @@ public sealed class ManualInstanceManager
 			instanceId = FindNextAvailableId() ?? 0;
 			if (instanceId == 0)
 				return new ManualInstanceResult(false, false, $"The configured manual instance limit of {MaximumInstanceCount} has been reached.");
-			string profilePath = AppDataPaths.ProfilePath(instanceId);
+			string profilePath = AppDataPaths.ProfilePath(instanceId, _config.TelegramWebUrl);
 			if (Directory.Exists(profilePath))
 				return new ManualInstanceResult(false, false, $"Instance {instanceId} already has a profile and was registered as an existing instance.");
 			Directory.CreateDirectory(profilePath);
@@ -150,7 +150,7 @@ public int MaximumInstanceCount
 			}
 			if (instanceId < 1 || instanceId > MaximumInstanceCount || !GetRegisteredInstanceIds().Contains(instanceId))
 				return new ManualInstanceResult(false, false, $"Instance {instanceId} is not registered for manual management.");
-			string profilePath = AppDataPaths.ProfilePath(instanceId);
+			string profilePath = AppDataPaths.ProfilePath(instanceId, _config.TelegramWebUrl);
 			if (!Directory.Exists(profilePath))
 				return new ManualInstanceResult(false, false, $"Instance {instanceId} profile is missing: {profilePath}. Create its profile through normal browser setup first.");
 			string? chromiumPath = PlaywrightHelper.FindChromiumPath();

@@ -234,33 +234,6 @@ internal class Program
 		_config.SetupDone = ConfigStorage.IsSetupDone();
 		var controller = new PromotionController(_config);
 		var bot = new TelegramControlBot(controller, token!, adminId);
-		using var hotkeys = new GlobalHotkeyListener();
-		void RegisterMenuCapture(uint virtualKey, string label, MenuCaptureTarget target)
-		{
-			hotkeys.Register(0u, virtualKey, label, () =>
-			{
-				if (!hotkeys.TryGetPointerPosition(out int rawX, out int rawY))
-				{
-					Logger.Warning($"[{label}] Could not read the X11 pointer; coordinate was not saved.");
-					return;
-				}
-				Task.Run(async () =>
-				{
-					MenuClosePosition? position = await controller.CaptureMenuButtonPositionAsync(rawX, rawY, target, label);
-					if (position == null)
-					{
-						Logger.Warning($"[{label}] Capture validation failed; no position was saved.");
-						await bot.NotifyMenuPositionCaptureFailedAsync(target, "Could not map or validate the VNC pointer in the active Playwright browser. No coordinates were saved.");
-						return;
-					}
-					Logger.Success($"[{label}] Saved Playwright viewport coordinate ({position.X},{position.Y}) at {position.ViewportWidth}x{position.ViewportHeight}.");
-					await bot.NotifyMenuPositionCapturedAsync(target, position);
-				});
-			});
-		}
-		RegisterMenuCapture(0x77u, "F8 (Out-of-chat menu close)", MenuCaptureTarget.OutOfChat);
-		RegisterMenuCapture(0x78u, "F9 (In-chat Reply Keyboard close)", MenuCaptureTarget.InChat);
-		hotkeys.Start();
 		bot.Start();
 		Logger.Info("[CONTROL] Integrated control bot ready; awaiting Telegram commands.");
 		var shutdown = new TaskCompletionSource();

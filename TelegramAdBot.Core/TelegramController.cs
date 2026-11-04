@@ -1,8 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,13 +13,6 @@ namespace TelegramAdBot.Core;
 
 public class TelegramController : IAsyncDisposable
 {
-    public enum ReplyKeyboardMenuState { Unknown, Open, Closed }
-	    [DllImport("libX11.so.6")] private static extern nint XOpenDisplay(nint display);
-    [DllImport("libX11.so.6")] private static extern int XCloseDisplay(nint display);
-    [DllImport("libX11.so.6")] private static extern nint XDefaultRootWindow(nint display);
-    [DllImport("libX11.so.6")] private static extern int XQueryPointer(nint display, nint window, out nint root, out nint child, out int rootX, out int rootY, out int windowX, out int windowY, out uint mask);
-    [DllImport("libX11.so.6")] private static extern int XTranslateCoordinates(nint display, nint source, nint destination, int srcX, int srcY, out int destX, out int destY, out nint child);
-    private readonly nint _display = OperatingSystem.IsLinux() ? XOpenDisplay(nint.Zero) : nint.Zero;
 	private IPlaywright? _playwright;
 
 	private IBrowserContext? _context;
@@ -33,7 +25,8 @@ public class TelegramController : IAsyncDisposable
 
 	private readonly int _instanceId;
 
-	private const string SEL_CHAT_LIST = ".chatlist-container,.chat-list,#column-left";
+	private const string SEL_CHAT_LIST = ".chatlist-container,.chat-list,#column-left,[data-testid='chat-list'],[class*='LeftMain'],[class*='leftColumn']";
+	private const string SEL_MESSAGE_INPUT = ".input-message-input[contenteditable='true'],[contenteditable='true'][data-placeholder],[contenteditable='true'][role='textbox']";
 
 	public bool HasResources => _page != null || _context != null || _playwright != null;
 
@@ -87,7 +80,16 @@ public class TelegramController : IAsyncDisposable
 				Logger.Error("Chromium not found.", _instanceId);
 				return false;
 			}
-			string sessionDir = AppDataPaths.ProfilePath(_instanceId);
+			string sessionDir = AppDataPaths.ProfilePath(_instanceId, _config.TelegramWebUrl);
+			if (!Directory.Exists(sessionDir) && IsWebAUrl(_config.TelegramWebUrl))
+			{
+				string legacyProfile = AppDataPaths.ProfilePath(_instanceId);
+				if (Directory.Exists(legacyProfile))
+				{
+					Logger.Info($"[Browser] Copying existing Web K profile into separate Web A profile for instance {_instanceId}.", _instanceId);
+					CopyDirectory(legacyProfile, sessionDir);
+				}
+			}
 			int xPos = 50 + ((_instanceId - 1) % 10) * 60;
 			int yPos = 50 + (((_instanceId - 1) / 10) % 10) * 60;
 			Logger.Step("Using Chromium: " + chromiumPath, _instanceId);
@@ -202,6 +204,10 @@ public class TelegramController : IAsyncDisposable
 		}
 	}
 
+	private static bool IsWebAUrl(string url) => Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) &&
+		uri.Host.Equals("web.telegram.org", StringComparison.OrdinalIgnoreCase) &&
+		uri.AbsolutePath.TrimEnd('/').EndsWith("/a", StringComparison.OrdinalIgnoreCase);
+
 	private static void CopyDirectory(string src, string dst)
 	{
 		Directory.CreateDirectory(dst);
@@ -259,7 +265,7 @@ public class TelegramController : IAsyncDisposable
 		_ = 1;
 		try
 		{
-			IElementHandle el = await _page.QuerySelectorAsync(".chatlist-container,.chat-list,#column-left");
+			IElementHandle el = await _page.QuerySelectorAsync(SEL_CHAT_LIST);
 			bool flag = el != null;
 			if (flag)
 			{
@@ -307,7 +313,7 @@ public class TelegramController : IAsyncDisposable
 			bool searchClicked = false;
 			try
 			{
-				IElementHandle searchInput = await _page.QuerySelectorAsync("input[type='text']");
+				IElementHandle searchInput = await _page.QuerySelectorAsync("input[type='text'],input[placeholder],input[aria-label*='Search' i]");
 				bool flag = searchInput != null;
 				if (flag)
 				{
@@ -338,7 +344,7 @@ public class TelegramController : IAsyncDisposable
 			}
 			if (!searchClicked)
 			{
-				Logger.Warning("Search not found — falling back to keyboard shortcut.", _instanceId);
+				Logger.Warning("Search not found â€” falling back to keyboard shortcut.", _instanceId);
 			}
 			await BrowserDiagnosticAsync($"Bot search text typed t.me/{clean}", "before");
 			await _page.Keyboard.TypeAsync("t.me/" + clean, new KeyboardTypeOptions
@@ -352,6 +358,8 @@ public class TelegramController : IAsyncDisposable
 			await BrowserDiagnosticAsync("Bot search submitted Enter", "after");
 			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
 			if (waitAfterEnter) await Task.Delay(2000);
+			if (!await VerifyExpectedBotConversationAsync(clean, requireMessageInput: true))
+				throw new InvalidOperationException($"Web A did not verify the selected conversation @{clean}.");
 			await BrowserDiagnosticAsync($"Bot search completed @{clean}; expected chat list visible", "after");
 			await BrowserDiagnosticAsync($"Bot conversation entered @{clean}; expected chat list visible", "after", screenshot: true);
 			Logger.Success("Opened @" + clean, _instanceId);
@@ -372,11 +380,14 @@ public class TelegramController : IAsyncDisposable
 		string actualIdentifier;
 		try { actualIdentifier = Uri.UnescapeDataString(actual.Fragment.TrimStart('#')); }
 		catch { return false; }
+		string fragment = actualIdentifier.Trim();
+		bool identified = string.Equals(fragment, expectedIdentifier, StringComparison.OrdinalIgnoreCase) ||
+			fragment.StartsWith("?", StringComparison.Ordinal) && fragment.Contains("username=" + botUsername.Trim().TrimStart('@'), StringComparison.OrdinalIgnoreCase);
 		return string.Equals(actual.Scheme, webBase.Scheme, StringComparison.OrdinalIgnoreCase) &&
 			string.Equals(actual.Host, webBase.Host, StringComparison.OrdinalIgnoreCase) &&
 			actual.Port == webBase.Port &&
-			string.Equals(actual.AbsolutePath.TrimEnd('/'), webBase.AbsolutePath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase) &&
-			string.Equals(actualIdentifier, expectedIdentifier, StringComparison.OrdinalIgnoreCase);
+			actual.AbsolutePath.TrimEnd('/').StartsWith(webBase.AbsolutePath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase) &&
+			identified;
 	}
 
 	public async Task<bool> VerifyExpectedBotConversationAsync(string botUsername, bool requireMessageInput)
@@ -396,7 +407,7 @@ public class TelegramController : IAsyncDisposable
 			try
 			{
 				if (_page == null || _page.IsClosed) return false;
-				await _page.Locator(".input-message-input[contenteditable='true']").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+				await _page.Locator(SEL_MESSAGE_INPUT).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
 			}
 			catch (Exception ex)
 			{
@@ -407,28 +418,6 @@ public class TelegramController : IAsyncDisposable
 
 		Logger.Success($"[Recovery] Conversation verified successfully: {expectedUrl}", _instanceId);
 		return true;
-	}
-
-	public async Task<bool> VerifyStickerPickerReadyAsync()
-	{
-		try
-		{
-			if (_page == null || _page.IsClosed) return false;
-			await _page.Locator(".emoji-dropdown").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
-			await _page.Locator(".emoji-dropdown .emoji-tabs-stickers.active").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 5000 });
-			Logger.Success("[Recovery] Sticker picker is visible and the Stickers tab is active.", _instanceId);
-			return true;
-		}
-		catch (Exception ex)
-		{
-			Logger.Warning($"[Recovery] Sticker picker readiness check failed: {ex.Message}", _instanceId);
-			return false;
-		}
-	}
-
-	public async Task CaptureRecoveryFailureAsync(string reason)
-	{
-		await BrowserDiagnosticAsync("Conversation recovery failed: " + reason, "recovery-failure", screenshot: true);
 	}
 
 	private string BuildExpectedBotConversationUrl(string botUsername)
@@ -447,7 +436,7 @@ public class TelegramController : IAsyncDisposable
 			Logger.Info($"[StartupDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Waiting exactly 3 seconds for @{botUsername} conversation.", _instanceId);
 			await Task.Delay(TimeSpan.FromSeconds(3));
 			await _page.BringToFrontAsync();
-			messageInput = _page.Locator(".input-message-input[contenteditable='true']");
+			messageInput = _page.Locator(SEL_MESSAGE_INPUT).First;
 			await messageInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
 			urlBeforeFocus = _page.Url;
 			await BrowserDiagnosticAsync($"Startup bot conversation @{botUsername} active; message input visible", "before-focus", screenshot: true);
@@ -455,8 +444,8 @@ public class TelegramController : IAsyncDisposable
 			await BrowserDiagnosticAsync("Startup message input FocusAsync completed (active element captured immediately)", "after-focus", screenshot: true);
 			bool inputHasFocus = await messageInput.EvaluateAsync<bool>("element => document.activeElement === element");
 			bool conversationStillOpen = !_page.IsClosed && _page.Url == urlBeforeFocus && await messageInput.IsVisibleAsync();
-			bool expectedBotRoute = Uri.TryCreate(urlBeforeFocus, UriKind.Absolute, out Uri? activeUri) &&
-				string.Equals(activeUri.Fragment, "#@" + botUsername.TrimStart('@'), StringComparison.OrdinalIgnoreCase);
+			bool expectedBotRoute = IsExpectedBotConversationUrl(urlBeforeFocus, _config.TelegramWebUrl, botUsername);
+			if (!expectedBotRoute) expectedBotRoute = await HasTargetChatHeaderAsync(botUsername);
 			if (!inputHasFocus || !conversationStillOpen || !expectedBotRoute)
 			{
 				await BrowserDiagnosticAsync($"Startup message-input focus or conversation verification failed for @{botUsername}; startup halted", "failure", screenshot: true);
@@ -472,6 +461,15 @@ public class TelegramController : IAsyncDisposable
 			Logger.Error($"[StartupDiag] Startup chat/input verification failed for @{botUsername}: {ex.Message}", _instanceId);
 			return false;
 		}
+	}
+
+	private async Task<bool> HasTargetChatHeaderAsync(string botUsername)
+	{
+		try
+		{
+			return _page != null && !_page.IsClosed && await _page.EvaluateAsync<bool>("username => { const target=username.replace(/^@/,'').toLowerCase(); const nodes=[...document.querySelectorAll('[data-peer-id],[data-chat-id],[class*=ChatInfo],[class*=chatInfo],[class*=title]')]; return nodes.some(e => { const text=((e.getAttribute('title')||'')+' '+(e.getAttribute('aria-label')||'')+' '+(e.textContent||'')).toLowerCase(); return text.includes('@'+target) || text.includes(target); }); }", botUsername);
+		}
+		catch { return false; }
 	}
 
 	public async Task<bool> WaitForTelegramReadyAsync(int timeoutMs = 15000)
@@ -532,7 +530,7 @@ public class TelegramController : IAsyncDisposable
 			{
 				return null;
 			}
-			Logger.Warning("PICK [" + label + "] — move mouse over target in browser. Capturing in 4s...", _instanceId);
+			Logger.Warning("PICK [" + label + "] â€” move mouse over target in browser. Capturing in 4s...", _instanceId);
 			try
 			{
 				await _page.BringToFrontAsync();
@@ -586,40 +584,6 @@ public class TelegramController : IAsyncDisposable
 		return position.HasValue && viewport.HasValue ? (position.Value.x, position.Value.y, viewport.Value.width, viewport.Value.height) : null;
 	}
 
-	public async Task<(int x, int y, int width, int height, double deviceScaleFactor, int windowX, int windowY)?> CaptureCurrentPagePointerAsync(int rawX, int rawY, string hotkey)
-	{
-		try
-		{
-			if (_page == null || _page.IsClosed || _display == nint.Zero || rawX < 0 || rawY < 0) return null;
-			nint root = XDefaultRootWindow(_display);
-			if (XQueryPointer(_display, root, out _, out nint window, out int pointerX, out int pointerY, out _, out _, out _) == 0 || pointerX != rawX || pointerY != rawY) return null;
-			if (XTranslateCoordinates(_display, window, root, 0, 0, out int winX, out int winY, out _) == 0) return null;
-			var page = await _page.EvaluateAsync<PointerCaptureResult>("() => { const r=document.documentElement.getBoundingClientRect(); return {width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1,screenX:window.screenX,screenY:window.screenY,outerWidth:window.outerWidth,outerHeight:window.outerHeight,innerLeft:window.outerWidth-window.innerWidth,innerTop:window.outerHeight-window.innerHeight}; }");
-			// X11 root pixels and window.screenX are both desktop coordinates but can
-			// differ by device scale. Use measured Chromium outer geometry to derive the
-			// viewport's desktop origin and reject if that origin doesn't agree with X11.
-			double viewportRootX = winX + page.InnerLeft * page.Dpr;
-			double viewportRootY = winY + page.InnerTop * page.Dpr;
-			double screenRootX = page.ScreenX * page.Dpr;
-			double screenRootY = page.ScreenY * page.Dpr;
-			if (Math.Abs(viewportRootX - screenRootX) > 3 * page.Dpr || Math.Abs(viewportRootY - screenRootY) > 3 * page.Dpr)
-			{
-				Logger.Warning($"[{hotkey}] Coordinate validation failed: X11 window origin ({winX},{winY}) disagrees with Chromium screen origin ({page.ScreenX},{page.ScreenY}) at scale {page.Dpr}.", _instanceId);
-				return null;
-			}
-			int x = (int)Math.Floor((pointerX - screenRootX) / page.Dpr);
-			int y = (int)Math.Floor((pointerY - screenRootY) / page.Dpr);
-			bool hit = await _page.EvaluateAsync<bool>("p => { const e=document.elementFromPoint(p.x,p.y); return !!e && p.x>=0 && p.y>=0 && p.x<innerWidth && p.y<innerHeight; }", new { x, y });
-			bool valid = hit && x >= 0 && y >= 0 && x < page.Width && y < page.Height;
-			Logger.Info($"[{hotkey}] raw X11=({rawX},{rawY}); browser window=({winX},{winY}) outer={page.OuterWidth}x{page.OuterHeight}; viewport={page.Width}x{page.Height}; deviceScaleFactor={page.Dpr}; Playwright=({x},{y}); validation={(valid ? "passed" : "failed")}.", _instanceId);
-			return valid ? (x, y, page.Width, page.Height, page.Dpr, winX, winY) : null;
-		}
-		catch (Exception ex) { Logger.Warning($"[{hotkey}] Could not convert X11 pointer to Playwright coordinates: " + ex.Message, _instanceId); return null; }
-	}
-public async Task<bool> StartMenuButtonPointerTrackingAsync() => _page != null && !_page.IsClosed;
-
-	private sealed class PointerCaptureResult { public int Width { get; set; } public int Height { get; set; } public double Dpr { get; set; } public double ScreenX { get; set; } public double ScreenY { get; set; } public int OuterWidth { get; set; } public int OuterHeight { get; set; } public int InnerLeft { get; set; } public int InnerTop { get; set; } }
-
 	public async Task<(int width, int height)?> GetViewportSizeAsync()
 	{
 		try
@@ -633,41 +597,6 @@ public async Task<bool> StartMenuButtonPointerTrackingAsync() => _page != null &
 			Logger.Warning("Could not read browser viewport dimensions: " + ex.Message, _instanceId);
 			return null;
 		}
-	}
-
-	public async Task<ReplyKeyboardMenuState> GetReplyKeyboardMenuStateAsync()
-	{
-		try
-		{
-			if (_page == null || _page.IsClosed) return ReplyKeyboardMenuState.Unknown;
-			string state = await _page.EvaluateAsync<string>("() => { const items=[...document.querySelectorAll('[aria-controls^=reply-keyboard-][aria-expanded]')].filter(e => { const r=e.getBoundingClientRect(); return r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden'; }); if(items.length!==1) return 'unknown'; return items[0].getAttribute('aria-expanded')==='true' ? 'open' : items[0].getAttribute('aria-expanded')==='false' ? 'closed' : 'unknown'; }");
-			return state switch { "open" => ReplyKeyboardMenuState.Open, "closed" => ReplyKeyboardMenuState.Closed, _ => ReplyKeyboardMenuState.Unknown };
-		}
-		catch (Exception ex)
-		{
-			Logger.Warning("Could not determine Telegram reply keyboard state: " + ex.Message, _instanceId);
-			return ReplyKeyboardMenuState.Unknown;
-		}
-	}
-
-	public async Task<bool> SetReplyKeyboardMenuStateAsync(int x, int y, ReplyKeyboardMenuState desiredState)
-	{
-		if (_page == null || _page.IsClosed || desiredState == ReplyKeyboardMenuState.Unknown) return false;
-		ReplyKeyboardMenuState currentState = await GetReplyKeyboardMenuStateAsync();
-		if (currentState == ReplyKeyboardMenuState.Unknown) return false;
-		if (currentState == desiredState) return true;
-		if (!await ClickAsync(x, y, "Telegram reply keyboard menu button", captureScreenshots: true)) return false;
-		bool expected = desiredState == ReplyKeyboardMenuState.Open;
-		try
-		{
-			await _page.WaitForFunctionAsync("expected => { const items=[...document.querySelectorAll('[aria-controls^=reply-keyboard-][aria-expanded]')].filter(e => { const r=e.getBoundingClientRect(); return r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden'; }); return items.length===1 && items[0].getAttribute('aria-expanded')===(expected ? 'true' : 'false'); }", expected, new PageWaitForFunctionOptions { Timeout = 5000 });
-		}
-		catch (Exception ex)
-		{
-			Logger.Warning($"Reply keyboard state did not become {desiredState} after the configured menu button click: {ex.Message}", _instanceId);
-			return false;
-		}
-		return await GetReplyKeyboardMenuStateAsync() == desiredState;
 	}
 
 	private sealed class ViewportResult
@@ -825,3 +754,4 @@ public async Task<bool> StartMenuButtonPointerTrackingAsync() => _page != null &
 		finally { _disposeLock.Release(); }
 	}
 }
+
