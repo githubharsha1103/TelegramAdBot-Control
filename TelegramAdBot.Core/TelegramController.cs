@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,15 @@ namespace TelegramAdBot.Core;
 
 public class TelegramController : IAsyncDisposable
 {
+    public enum ReplyKeyboardMenuState { Unknown, Open, Closed }
+	    [DllImport("libX11.so.6")] private static extern nint XOpenDisplay(nint display);
+    [DllImport("libX11.so.6")] private static extern int XCloseDisplay(nint display);
+    [DllImport("libX11.so.6")] private static extern int XFree(nint data);
+    [DllImport("libX11.so.6")] private static extern int XFetchName(nint display, nint window, out nint windowName);
+    [DllImport("libX11.so.6")] private static extern nint XDefaultRootWindow(nint display);
+    [DllImport("libX11.so.6")] private static extern int XQueryPointer(nint display, nint window, out nint root, out nint child, out int rootX, out int rootY, out int windowX, out int windowY, out uint mask);
+    [DllImport("libX11.so.6")] private static extern int XTranslateCoordinates(nint display, nint source, nint destination, int srcX, int srcY, out int destX, out int destY, out nint child);
+    private readonly nint _display = OperatingSystem.IsLinux() ? XOpenDisplay(nint.Zero) : nint.Zero;
 	private IPlaywright? _playwright;
 
 	private IBrowserContext? _context;
@@ -577,6 +587,31 @@ public class TelegramController : IAsyncDisposable
 		(int width, int height)? viewport = await GetViewportSizeAsync();
 		return position.HasValue && viewport.HasValue ? (position.Value.x, position.Value.y, viewport.Value.width, viewport.Value.height) : null;
 	}
+
+	    	public async Task<(int x, int y, int width, int height, int scaleX, int scaleY)?> CaptureCurrentPagePointerAsync(int rawX, int rawY)
+	{
+		try
+		{
+			if (_page == null || _page.IsClosed || _display == nint.Zero || rawX < 0 || rawY < 0) return null;
+			nint root = XDefaultRootWindow(_display);
+			if (XQueryPointer(_display, root, out _, out nint window, out int pointerX, out int pointerY, out _, out _, out _) == 0 || pointerX != rawX || pointerY != rawY) return null;
+			if (XFetchName(_display, window, out nint namePtr) == 0 || namePtr == nint.Zero) return null;
+			string title = Marshal.PtrToStringAnsi(namePtr) ?? ""; XFree(namePtr);
+			if (!title.Contains("Telegram", StringComparison.OrdinalIgnoreCase)) return null;
+			if (XTranslateCoordinates(_display, window, root, 0, 0, out int winX, out int winY, out _) == 0) return null;
+			var page = await _page.EvaluateAsync<PointerCaptureResult>("raw => { const x=Math.floor((raw.x-screenX)/devicePixelRatio),y=Math.floor((raw.y-screenY)/devicePixelRatio); const e=document.elementFromPoint(x,y); return {width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1,x,y,valid:!!e && x<innerWidth && y<innerHeight}; }", new { x = pointerX, y = pointerY });
+			int x = page.X, y = page.Y;
+			if (!page.Valid || x < 0 || y < 0 || x >= page.Width || y >= page.Height) return null;
+			int offsetX = pointerX - winX - (int)Math.Round(page.X * page.Dpr);
+			int offsetY = pointerY - winY - (int)Math.Round(page.Y * page.Dpr);
+			Logger.Info($"[MenuCapture] raw X11=({rawX},{rawY}); windowOrigin=({winX},{winY}); measured browser content offset=({offsetX},{offsetY}); deviceScaleFactor={page.Dpr}; Playwright=({x},{y}) viewport={page.Width}x{page.Height}.", _instanceId);
+			return (x, y, page.Width, page.Height, 1, 1);
+		}
+		catch (Exception ex) { Logger.Warning("Could not convert X11 pointer to Playwright coordinates: " + ex.Message, _instanceId); return null; }
+	}
+public async Task<bool> StartMenuButtonPointerTrackingAsync() => _page != null && !_page.IsClosed;
+
+	private sealed class PointerCaptureResult { public int Width { get; set; } public int Height { get; set; } public double Dpr { get; set; } public int X { get; set; } public int Y { get; set; } public int WindowX { get; set; } public int WindowY { get; set; } public bool Valid { get; set; } }
 
 	public async Task<(int width, int height)?> GetViewportSizeAsync()
 	{

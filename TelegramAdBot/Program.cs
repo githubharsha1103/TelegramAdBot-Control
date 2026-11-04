@@ -234,6 +234,24 @@ internal class Program
 		_config.SetupDone = ConfigStorage.IsSetupDone();
 		var controller = new PromotionController(_config);
 		var bot = new TelegramControlBot(controller, token!, adminId);
+		using var hotkeys = new GlobalHotkeyListener();
+		hotkeys.Register(0u, 0x77u, "F8 (Capture menu close button)", () =>
+		{
+			int rawX = -1, rawY = -1;
+			hotkeys.TryGetPointerPosition(out rawX, out rawY);
+			Task.Run(async () =>
+			{
+                GlobalMenuButtonPosition? position = await controller.CaptureMenuButtonPositionAsync(rawX, rawY);
+				if (position == null)
+				{
+					Logger.Warning("[MenuCapture] Could not map the current VNC pointer into the Telegram browser viewport; coordinate was not saved.");
+					return;
+				}
+				Logger.Success($"[MenuCapture] Saved Playwright viewport coordinate ({position.X},{position.Y}) at {position.ViewportWidth}x{position.ViewportHeight}.");
+				await bot.NotifyMenuPositionCapturedAsync(position);
+			});
+		});
+		hotkeys.Start();
 		bot.Start();
 		Logger.Info("[CONTROL] Integrated control bot ready; awaiting Telegram commands.");
 		var shutdown = new TaskCompletionSource();

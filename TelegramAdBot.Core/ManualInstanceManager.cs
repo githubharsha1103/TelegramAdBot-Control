@@ -129,7 +129,7 @@ public sealed class ManualInstanceManager
 
 	public IReadOnlyList<int> OpenInstanceIds => _processes.Keys.Where(IsOpen).OrderBy(id => id).ToList();
 
-	public int MaximumInstanceCount
+public int MaximumInstanceCount
 	{
 		get
 		{

@@ -200,6 +200,7 @@ public class GlobalHotkeyListener : IDisposable
                         $"Global hotkey detected: {hk.Name}"
                     );
 
+
                     if (_handlers.TryGetValue(
                         hk.Id,
                         out Action? callback))
@@ -238,6 +239,16 @@ public class GlobalHotkeyListener : IDisposable
         }
     }
 
+    public bool TryGetPointerPosition(out int x, out int y)
+    {
+        x = y = 0;
+        if (_display == nint.Zero) return false;
+        try { return XQueryPointer(_display, XDefaultRootWindow(_display), out _, out _, out x, out y, out _, out _, out _) != 0; }
+        catch (Exception ex) { Logger.Warning("Could not read raw X11 pointer position: " + ex.Message); return false; }
+    }
+
+    [DllImport("libX11.so.6")] private static extern nint XDefaultRootWindow(nint display);
+    [DllImport("libX11.so.6")] private static extern int XQueryPointer(nint display, nint window, out nint root, out nint child, out int rootX, out int rootY, out int windowX, out int windowY, out uint mask);
     private bool AreModifiersDown(
         byte[] keyboard,
         uint modifiers)
@@ -319,7 +330,7 @@ public class GlobalHotkeyListener : IDisposable
 
         // X11 F1..F3 keysyms are XK_F1..XK_F3 (0xFFBE..0xFFC0).
         if (windowsVirtualKey >= 0x70 &&
-            windowsVirtualKey <= 0x72)
+            windowsVirtualKey <= 0x77)
         {
             nint keysym = (nint)(0xFFBE + (windowsVirtualKey - 0x70));
             return XKeysymToKeycode(_display, keysym);

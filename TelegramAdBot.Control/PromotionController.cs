@@ -15,7 +15,7 @@ public sealed class PromotionController
 {
     private readonly BotConfig _config;
     private readonly BotConfigManager _botConfig;
-    private readonly BotMenuButtonPositionStore _menuButtonPositions;
+    private readonly GlobalMenuButtonPositionStore _menuButtonPositions;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private readonly ConcurrentDictionary<int, InstanceAccountProgress> _instanceProgress = new();
     private readonly object _errorLock = new();
@@ -30,28 +30,24 @@ public sealed class PromotionController
     private int _currentSelectedAccountIndex;
     private PromotionRunState _runState = PromotionRunState.Idle;
 
-    public PromotionController(BotConfig config, BotConfigManager? botConfig = null, BotMenuButtonPositionStore? menuButtonPositions = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _menuButtonPositions = menuButtonPositions ?? new BotMenuButtonPositionStore(); _manualInstances = new ManualInstanceManager(config); }
+    public PromotionController(BotConfig config, BotConfigManager? botConfig = null, GlobalMenuButtonPositionStore? menuButtonPositions = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _menuButtonPositions = menuButtonPositions ?? new GlobalMenuButtonPositionStore(); _manualInstances = new ManualInstanceManager(config); }
 
     public IReadOnlyList<string> GetAvailableBots() => _botConfig.GetBots();
     public int MaxSupportedInstanceCount => GetMaximumInstanceCount();
     public int GetConfiguredBotCount() => _botConfig.GetBots().Count;
     public bool TryAddBot(string username, out string normalized, out string error) => _botConfig.TryAdd(username, out normalized, out error);
     public bool RemoveBot(string username) => _botConfig.Remove(username);
-    public BotMenuButtonPosition? GetMenuButtonPosition(string username) => _menuButtonPositions.Get(username);
-    public bool SaveMenuButtonPosition(BotMenuButtonPosition position) => _menuButtonPositions.Save(position);
+    public GlobalMenuButtonPosition? GetMenuButtonPosition() => _menuButtonPositions.Load();
+    public bool SaveMenuButtonPosition(GlobalMenuButtonPosition position) => _menuButtonPositions.Save(position);
 
-    public async Task<(BotMenuButtonPosition? Position, string Error)> PickMenuButtonPositionAsync(string botUsername, CancellationToken cancellationToken = default)
+    public async Task<GlobalMenuButtonPosition?> CaptureMenuButtonPositionAsync(int rawX, int rawY)
     {
-        string bot = BotMenuButtonPositionStore.Normalize(botUsername);
-        if (!_botConfig.GetBots().Contains(bot, StringComparer.OrdinalIgnoreCase)) return (null, $"@{bot} is not in the configured bot list.");
-        BotEngine? engine = _manager?.Engines.FirstOrDefault(candidate => candidate.IsBrowserAlive && (!candidate.IsRunning || candidate.IsPaused));
-        if (engine == null)
-        {
-            if (_manager?.Engines.Any(candidate => candidate.IsBrowserAlive) == true) return (null, "Pause promotion before selecting a menu button position.");
-            return (null, "No existing Playwright VNC browser is open. Start promotion; if this bot has no saved menu position, it will pause safely for configuration.");
-        }
-        if (engine.IsInitializing) return (null, "Wait for browser startup to finish before selecting a menu button position.");
-        return await engine.PickMenuButtonPositionAsync(bot, cancellationToken);
+        BotEngine? engine = _manager?.Engines.FirstOrDefault(candidate => candidate.IsBrowserAlive);
+        if (engine?.Controller == null) return null;
+        var capture = await engine.Controller.CaptureCurrentPagePointerAsync(rawX, rawY);
+        if (!capture.HasValue) return null;
+        var position = new GlobalMenuButtonPosition { X = capture.Value.x, Y = capture.Value.y, ViewportWidth = capture.Value.width, ViewportHeight = capture.Value.height, CapturedAt = DateTimeOffset.UtcNow };
+        return SaveMenuButtonPosition(position) ? position : null;
     }
     public int ManualInstanceLimit => _manualInstances.MaximumInstanceCount;
     public IReadOnlyList<int> GetRegisteredManualInstanceIds() => _manualInstances.GetRegisteredInstanceIds();
