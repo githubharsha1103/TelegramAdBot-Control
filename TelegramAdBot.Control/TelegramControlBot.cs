@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using TelegramAdBot.Core;
+using TelegramAdBot.Models;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
@@ -33,6 +34,7 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     private readonly HttpClient _apiHttpClient;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<long, Session> _sessions = new();
+    private readonly ConcurrentDictionary<long, MenuPositionSetup> _menuPositionSetups = new();
     private readonly ConcurrentDictionary<long, int> _statusMessages = new();
     private readonly ConcurrentDictionary<long, int> _panelMessages = new();
     private readonly ConcurrentDictionary<long, string> _controlRenderKeys = new();
@@ -480,10 +482,91 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
     {
         new[] { InlineKeyboardButton.WithCallbackData("⚙️ Configure", TaggedCallback("panel", token, "configure")), InlineKeyboardButton.WithCallbackData(status.IsRunning || status.IsPaused ? "🚀 Promotion" : "▶️ Start Promotion", TaggedCallback("panel", token, status.IsRunning || status.IsPaused ? "promotion" : "start")) },
         status.IsRunning || status.IsPaused ? new[] { InlineKeyboardButton.WithCallbackData(status.IsPaused ? "▶️ Resume" : "⏸ Pause", TaggedCallback("panel", token, status.IsPaused ? "resume" : "pause")), InlineKeyboardButton.WithCallbackData("🛑 Stop", TaggedCallback("panel", token, "stop")) } : new[] { InlineKeyboardButton.WithCallbackData("🔄 Refresh", TaggedCallback("panel", token, "refresh")), InlineKeyboardButton.WithCallbackData("🚀 Promotion", TaggedCallback("panel", token, "promotion")) },
+        new[] { InlineKeyboardButton.WithCallbackData("📍 Configure Menu Button Position", TaggedCallback("panel", token, "menu-position")) },
         new[] { InlineKeyboardButton.WithCallbackData("🤖 Bots", TaggedCallback("panel", token, "bots")), InlineKeyboardButton.WithCallbackData("👥 Accounts", TaggedCallback("panel", token, "accounts")) },
         new[] { InlineKeyboardButton.WithCallbackData("🖥 Instances", TaggedCallback("panel", token, "instances")), InlineKeyboardButton.WithCallbackData("📊 Activity", TaggedCallback("panel", token, "status")) },
         new[] { InlineKeyboardButton.WithCallbackData("⚙️ Settings", TaggedCallback("panel", token, "settings")), InlineKeyboardButton.WithCallbackData("❓ Help", TaggedCallback("panel", token, "help")) }
     });
+
+    private async Task RenderMenuPositionBotPickerAsync(long chatId, CancellationToken ct)
+    {
+        string token = _panelCallbackTokens.GetOrAdd(chatId, _ => Guid.NewGuid().ToString("N")[..8]);
+        List<InlineKeyboardButton[]> rows = _controller.GetAvailableBots()
+            .Select(bot => new[] { InlineKeyboardButton.WithCallbackData("@" + bot, TaggedCallback("panel", token, "menu:bot:" + bot)) })
+            .ToList();
+        rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Cancel", TaggedCallback("panel", token, "menu:cancel")) });
+        string prompt = rows.Count == 1 ? "No bots are configured. Add a bot before choosing its menu button position." : "Choose the bot whose Telegram menu button position you want to configure:";
+        await RenderControlAsync(chatId, "dashboard", prompt, new InlineKeyboardMarkup(rows), ct);
+    }
+
+    private async Task SelectMenuPositionBotAsync(long chatId, string bot, CancellationToken ct)
+    {
+        if (!_controller.GetAvailableBots().Contains(bot, StringComparer.OrdinalIgnoreCase))
+        {
+            await RenderMenuPositionBotPickerAsync(chatId, ct);
+            return;
+        }
+        _menuPositionSetups[chatId] = new MenuPositionSetup { BotIdentifier = bot };
+        await RenderMenuPositionChoiceAsync(chatId, ct);
+    }
+
+    private async Task RenderMenuPositionChoiceAsync(long chatId, CancellationToken ct, string notice = "")
+    {
+        if (!_menuPositionSetups.TryGetValue(chatId, out MenuPositionSetup? setup)) { await RenderMenuPositionBotPickerAsync(chatId, ct); return; }
+        string token = _panelCallbackTokens.GetOrAdd(chatId, _ => Guid.NewGuid().ToString("N")[..8]);
+        BotMenuButtonPosition? saved = _controller.GetMenuButtonPosition(setup.BotIdentifier);
+        List<string> lines = new() { $"Configure menu button position for @{setup.BotIdentifier}." };
+        if (saved is { Configured: true }) lines.Add($"Saved: X={saved.X}, Y={saved.Y} (viewport {saved.ViewportWidth}×{saved.ViewportHeight}).");
+        if (setup.Captured) lines.Add($"Selected: X={setup.X}, Y={setup.Y} (viewport {setup.ViewportWidth}×{setup.ViewportHeight}).");
+        if (!string.IsNullOrWhiteSpace(notice)) lines.Add(notice);
+        List<InlineKeyboardButton[]> rows = new();
+        if (!setup.Captured) rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Choose Position in VNC", TaggedCallback("panel", token, "menu:pick:" + setup.BotIdentifier)) });
+        else rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Save", TaggedCallback("panel", token, "menu:save")) });
+        rows.Add(new[] { InlineKeyboardButton.WithCallbackData("Cancel", TaggedCallback("panel", token, "menu:cancel")) });
+        await RenderControlAsync(chatId, "dashboard", string.Join("\n", lines), new InlineKeyboardMarkup(rows), ct);
+    }
+
+    private async Task PickMenuPositionAsync(long chatId, string bot, CancellationToken ct)
+    {
+        if (!_menuPositionSetups.TryGetValue(chatId, out MenuPositionSetup? setup) || !string.Equals(setup.BotIdentifier, bot, StringComparison.OrdinalIgnoreCase)) return;
+        string token = _panelCallbackTokens.GetOrAdd(chatId, _ => Guid.NewGuid().ToString("N")[..8]);
+        await RenderControlAsync(chatId, "dashboard", $"Move the VNC cursor over Telegram's reply keyboard menu button for @{bot}. Capturing the browser viewport position now...", new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("Cancel", TaggedCallback("panel", token, "menu:cancel")) } }), ct);
+        var result = await _controller.PickMenuButtonPositionAsync(bot, ct);
+        if (result.Position == null)
+        {
+            await RenderMenuPositionChoiceAsync(chatId, ct, "Could not capture position: " + result.Error);
+            return;
+        }
+        setup.X = result.Position.X;
+        setup.Y = result.Position.Y;
+        setup.ViewportWidth = result.Position.ViewportWidth;
+        setup.ViewportHeight = result.Position.ViewportHeight;
+        setup.Captured = true;
+        await RenderMenuPositionChoiceAsync(chatId, ct);
+    }
+
+    private async Task SaveMenuPositionAsync(long chatId, CancellationToken ct)
+    {
+        if (!_menuPositionSetups.TryGetValue(chatId, out MenuPositionSetup? setup) || !setup.Captured) return;
+        bool saved = _controller.SaveMenuButtonPosition(new BotMenuButtonPosition
+        {
+            BotIdentifier = setup.BotIdentifier,
+            X = setup.X,
+            Y = setup.Y,
+            ViewportWidth = setup.ViewportWidth,
+            ViewportHeight = setup.ViewportHeight,
+            Configured = true
+        });
+        if (!saved)
+        {
+            await RenderMenuPositionChoiceAsync(chatId, ct, "The coordinates could not be saved. Review the selection and retry.");
+            return;
+        }
+        Helpers.Logger.Success($"[MenuPosition] Saved @{setup.BotIdentifier} at ({setup.X},{setup.Y}) from viewport {setup.ViewportWidth}x{setup.ViewportHeight}.");
+        _menuPositionSetups.TryRemove(chatId, out _);
+        string token = _panelCallbackTokens.GetOrAdd(chatId, _ => Guid.NewGuid().ToString("N")[..8]);
+        await RenderControlAsync(chatId, "dashboard", $"Menu button position saved for @{setup.BotIdentifier}: X={setup.X}, Y={setup.Y}.", new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("Dashboard", TaggedCallback("panel", token, "refresh")), InlineKeyboardButton.WithCallbackData("Configure Another", TaggedCallback("panel", token, "menu-position")) } }), ct);
+    }
 
     private async Task BeginAsync(long chatId, CancellationToken ct)
     {
@@ -626,6 +709,11 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             if (panelAction == "settings") { await SettingsAsync(chatId, ct); return; }
             if (panelAction == "help") { await HelpAsync(chatId, ct); return; }
             if (panelAction == "refresh") { await RenderDashboardAsync(chatId, ct); return; }
+            if (panelAction == "menu-position") { await RenderMenuPositionBotPickerAsync(chatId, ct); return; }
+            if (panelAction.StartsWith("menu:bot:", StringComparison.Ordinal)) { await SelectMenuPositionBotAsync(chatId, panelAction.Substring("menu:bot:".Length), ct); return; }
+            if (panelAction.StartsWith("menu:pick:", StringComparison.Ordinal)) { await PickMenuPositionAsync(chatId, panelAction.Substring("menu:pick:".Length), ct); return; }
+            if (panelAction == "menu:save") { await SaveMenuPositionAsync(chatId, ct); return; }
+            if (panelAction == "menu:cancel") { _menuPositionSetups.TryRemove(chatId, out _); await RenderDashboardAsync(chatId, ct); return; }
             return;
         }
         if (data.StartsWith("sel:", StringComparison.Ordinal))
@@ -1407,6 +1495,16 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         foreach (var token in _statusRefreshTokens.Values) { token.Cancel(); token.Dispose(); }
         _apiHttpClient.Dispose();
         _cts.Dispose();
+    }
+
+    private sealed class MenuPositionSetup
+    {
+        public string BotIdentifier { get; set; } = "";
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int ViewportWidth { get; set; }
+        public int ViewportHeight { get; set; }
+        public bool Captured { get; set; }
     }
 
     private sealed class Session

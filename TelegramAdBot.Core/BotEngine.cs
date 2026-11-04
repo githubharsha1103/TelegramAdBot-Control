@@ -48,6 +48,9 @@ public class BotEngine
 	private int _promoIndex;
 
 	private bool _stopDeliveredForCurrentCycle;
+	private readonly BotMenuButtonPositionStore _menuButtonPositions = new();
+	private readonly Dictionary<string, ReplyKeyboardMenuState> _menuStateByBot = new(StringComparer.OrdinalIgnoreCase);
+	private string _menuConfigurationError = "";
 
 	private string _currentBotUsername = "";
 
@@ -70,6 +73,7 @@ public class BotEngine
 	public int CyclesOnCurrentBot => _cyclesOnCurrentBot;
 
 	public int CompletedCycles => _completedCycles;
+	public string MenuConfigurationError => _menuConfigurationError;
 	public int CurrentAccount => _currentAccount;
 	public int SelectedAccountIndex => _selectedAccountIndex;
 	public int SelectedAccountCount => _selectedAccounts.Count;
@@ -78,6 +82,37 @@ public class BotEngine
 	public string AccountState => _accountSwitching ? $"🔄 Switching to Account {_selectedAccounts.ElementAtOrDefault(_selectedAccountIndex + 1)}..." : _initializing ? $"⚙️ Initializing Account {_currentAccount}..." : _running ? $"🚀 Account {_currentAccount} promotion running..." : IsFinished ? "All selected accounts complete" : "";
 
 	public string CurrentBotUsername => _currentBotUsername;
+
+	public async Task<(BotMenuButtonPosition? Position, string Error)> PickMenuButtonPositionAsync(string botUsername, CancellationToken ct = default)
+	{
+		if (_controller == null || !_controller.IsBrowserOpen()) return (null, "No Playwright browser is available for this instance.");
+		if (_running && !_paused) return (null, "Pause this promotion instance before selecting a menu button position.");
+		string returnBot = _currentBotUsername;
+		bool switchedChat = !string.Equals(returnBot, botUsername, StringComparison.OrdinalIgnoreCase);
+		bool navigated = !switchedChat || await _controller.TryNavigateToBotChatAsync(botUsername);
+		if (!navigated) return (null, $"Could not open @{botUsername} in this VNC browser.");
+		if (!await _controller.VerifyExpectedBotConversationAsync(botUsername, requireMessageInput: true))
+		{
+			if (switchedChat && !await RestorePausedConversationAsync(returnBot)) _recoveryBlocked = true;
+			return (null, $"The expected conversation for @{botUsername} was not verified before coordinate selection.");
+		}
+		var picked = await _controller.PickPositionWithViewportAsync($"Menu button for @{botUsername}", ct);
+		if (switchedChat)
+		{
+			if (!await RestorePausedConversationAsync(returnBot))
+			{
+				_recoveryBlocked = true;
+				return (null, $"Position was captured, but the promotion conversation @{returnBot} could not be restored; the instance remains blocked and paused.");
+			}
+		}
+		return picked.HasValue
+			? (new BotMenuButtonPosition { BotIdentifier = BotMenuButtonPositionStore.Normalize(botUsername), X = picked.Value.x, Y = picked.Value.y, ViewportWidth = picked.Value.width, ViewportHeight = picked.Value.height, Configured = true }, "")
+			: (null, "No browser position was captured. Move the VNC cursor over Telegram's reply keyboard menu button during the capture countdown.");
+	}
+
+	private async Task<bool> RestorePausedConversationAsync(string botUsername) =>
+		_controller != null && await _controller.TryNavigateToBotChatAsync(botUsername) && await _controller.VerifyExpectedBotConversationAsync(botUsername, requireMessageInput: true);
+
 	public void ConfigureAccounts(IReadOnlyList<int> accounts) => _selectedAccounts = accounts;
 	public void SetSelectedAccountIndex(int index) { _selectedAccountIndex = index; if (index >= 0 && index < _selectedAccounts.Count) _currentAccount = _selectedAccounts[index]; }
 	public void MarkAccountInitializedAtBoundary() { _accountInitializedAtBoundary = true; _initializedForNextLoop = false; }
@@ -196,8 +231,13 @@ public class BotEngine
 				if (!navigationCompleted && attempt < 3) await Task.Delay(1000);
 			}
 			if (!navigationCompleted) throw new InvalidOperationException($"Bot search/open failed for @{_currentBotUsername} after 3 attempts.");
+			BotMenuButtonPosition? startupMenuPosition = _menuButtonPositions.Get(_currentBotUsername);
+			if (startupMenuPosition is { Configured: true })
+				Logger.Info($"[Menu] Loaded configured menu button position for @{_currentBotUsername} ({startupMenuPosition.X},{startupMenuPosition.Y}) from {startupMenuPosition.ViewportWidth}x{startupMenuPosition.ViewportHeight} viewport.", _instanceId);
+			else
+				Logger.Warning($"[Menu] No menu button position is saved for @{_currentBotUsername}; if a menu interaction is needed, promotion will pause before clicking.", _instanceId);
 			Logger.Info("[PromotionInit] Setting up sticker tab.", _instanceId);
-			if (!await _controller.VerifyStartupChatAndFocusMessageInputAsync(_currentBotUsername)) throw new InvalidOperationException("Startup chat/input verification failed; no startup Escape was sent.");
+			if (!await _controller.VerifyStartupChatAndFocusMessageInputAsync(_currentBotUsername)) throw new InvalidOperationException("Startup chat/input verification failed.");
 			if (!await PrepareBotForCyclingAsync(CancellationToken.None)) throw new InvalidOperationException("Sticker and chat setup failed.");
 			Logger.Success($"[PromotionInit] Account {_currentAccount} initialization completed.", _instanceId);
 			_initializedForNextLoop = true;
@@ -294,7 +334,7 @@ public class BotEngine
 		Logger.Warning("STOPPED.", _instanceId);
 	}
 
-	private async Task<bool> PrepareBotForCyclingAsync(CancellationToken ct, bool verifyStickerPickerReady = false)
+	private async Task<bool> PrepareBotForCyclingAsync(CancellationToken ct, bool verifyStickerPickerReady = false, bool ensureMenuClosed = false)
 	{
 		if (_controller == null) return false;
 		Logger.Step($"Preparing chat: waiting {_config.WaitAfterNavigate}ms...", _instanceId);
@@ -308,6 +348,7 @@ public class BotEngine
 		{
 			return false;
 		}
+		if (ensureMenuClosed && !await TrySetMenuStateAsync(_currentBotUsername, ReplyKeyboardMenuState.Closed)) return false;
 		Logger.Step("auto-click EMOJI button", _instanceId);
 		if (!await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY, "Sticker icon / emoji button", captureScreenshots: true)) return false;
 		try
@@ -378,7 +419,7 @@ public class BotEngine
 				}
 				if (await SwitchToNextBotAsync(ct))
 				{
-					if (!_accountInitializedAtBoundary && !await PrepareBotForCyclingAsync(ct)) { _finished = true; _running = false; break; }
+					if (!_accountInitializedAtBoundary && !await PrepareBotForCyclingAsync(ct, ensureMenuClosed: true)) { _finished = true; _running = false; break; }
 					_accountInitializedAtBoundary = false;
 					if (!ct.IsCancellationRequested)
 					{
@@ -409,8 +450,8 @@ public class BotEngine
 				}
 				await LogCycleWaitAsync("Search command", _config.WaitAfterSearch);
 				await Task.Delay(1000, ct);
-				if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape after partner search.");
-				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Escape pressed after search.", _instanceId);
+				if (!await EnsureMenuStateWithPauseAsync(_currentBotUsername, ReplyKeyboardMenuState.Closed, ct)) break;
+				Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Telegram menu button confirmed closed after search.", _instanceId);
 				await Task.Delay(1000, ct);
 				Logger.Step("emoji button click", _instanceId);
 				await _controller.ClickAsync(_config.EmojiButtonX, _config.EmojiButtonY, "Cycle sticker icon / emoji button", captureScreenshots: _completedCycles == 0);
@@ -456,8 +497,7 @@ public class BotEngine
 					{
 						await LogCycleWaitAsync("/stop command", _config.WaitAfterStop);
 						await Task.Delay(1000, ct);
-						if (!await _controller.DismissReplyKeyboardAsync()) throw new InvalidOperationException("Could not press Escape after /stop.");
-						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Escape pressed after /stop; cycle completed.", _instanceId);
+						Logger.Info($"[CycleDiag] {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} | Existing post-/stop wait completed; checking conversation URL.", _instanceId);
 						_completedCycles++;
 						Logger.Success($"Cycle {_cyclesOnCurrentBot}/{_config.CyclesPerBot} done on @{_currentBotUsername}", _instanceId);
 						if (_controller != null && !await _controller.VerifyExpectedBotConversationAsync(_currentBotUsername, requireMessageInput: false))
@@ -575,10 +615,10 @@ public class BotEngine
 				failureStage = "URL or message input verification";
 				failure = $"Recovered navigation did not verify the expected conversation and message input for @{_currentBotUsername}.";
 			}
-			else if (!await PrepareBotForCyclingAsync(ct, verifyStickerPickerReady: true))
+			else if (!await PrepareBotForCyclingAsync(ct, verifyStickerPickerReady: true, ensureMenuClosed: true))
 			{
-				failureStage = "sticker setup initialization";
-				failure = $"Sticker setup did not complete for cycle {completedCycle}.";
+				failureStage = "menu or sticker setup initialization";
+				failure = $"Menu and sticker setup did not complete for cycle {completedCycle}.";
 			}
 			else if (!_stopDeliveredForCurrentCycle && !await SubmitStopOnceDuringRecoveryAsync(completedCycle))
 			{
@@ -605,6 +645,65 @@ public class BotEngine
 		Logger.Error($"[Recovery] Recovery failed at stage '{failureStage}' after cycle {completedCycle}; promotion remains paused. {failure}", _instanceId);
 		await _controller.CaptureRecoveryFailureAsync($"cycle {completedCycle}, stage {failureStage}: {failure}");
 		return false;
+	}
+
+	private async Task<bool> EnsureMenuStateWithPauseAsync(string botUsername, ReplyKeyboardMenuState desiredState, CancellationToken ct)
+	{
+		while (!ct.IsCancellationRequested)
+		{
+			if (await TrySetMenuStateAsync(botUsername, desiredState)) return true;
+			_paused = true;
+			Logger.Error($"[Menu] @{botUsername} menu state is unknown or its position is not configured. Promotion paused before any menu click; configure the position or restore a detectable menu state, then resume.", _instanceId);
+			while (_paused && !ct.IsCancellationRequested) await Task.Delay(300, ct);
+		}
+		return false;
+	}
+
+	private async Task<bool> TrySetMenuStateAsync(string botUsername, ReplyKeyboardMenuState desiredState)
+	{
+		if (_controller == null) return false;
+		BotMenuButtonPosition? saved = _menuButtonPositions.Get(botUsername);
+		if (saved == null || !saved.Configured)
+		{
+			_menuStateByBot[botUsername] = ReplyKeyboardMenuState.Unknown;
+			_menuConfigurationError = $"Menu button coordinates are not configured for @{botUsername}. Use Configure Menu Button Position, save coordinates, then resume.";
+			Logger.Error("[Menu] " + _menuConfigurationError + " No click was attempted.", _instanceId);
+			return false;
+		}
+		if (saved.ViewportWidth <= 0 || saved.ViewportHeight <= 0 || saved.X < 0 || saved.Y < 0 || saved.X >= saved.ViewportWidth || saved.Y >= saved.ViewportHeight)
+		{
+			_menuStateByBot[botUsername] = ReplyKeyboardMenuState.Unknown;
+			_menuConfigurationError = $"Saved menu button coordinates for @{botUsername} are invalid; reconfigure the position.";
+			return false;
+		}
+		ReplyKeyboardMenuState current = await _controller.GetReplyKeyboardMenuStateAsync();
+		_menuStateByBot[botUsername] = current;
+		if (current == ReplyKeyboardMenuState.Unknown)
+		{
+			_menuConfigurationError = $"Telegram menu state is unknown for @{botUsername}; promotion is paused without clicking.";
+			return false;
+		}
+		if (current == desiredState) { _menuConfigurationError = ""; return true; }
+		(int width, int height)? viewport = await _controller.GetViewportSizeAsync();
+		if (!viewport.HasValue) { _menuConfigurationError = $"Could not read the browser viewport for @{botUsername}; promotion is paused."; return false; }
+		int x = (int)Math.Round(saved.X * (double)viewport.Value.width / saved.ViewportWidth);
+		int y = (int)Math.Round(saved.Y * (double)viewport.Value.height / saved.ViewportHeight);
+		if (x < 0 || y < 0 || x >= viewport.Value.width || y >= viewport.Value.height)
+		{
+			Logger.Error($"[Menu] Saved @{botUsername} coordinate scaled outside the current viewport: ({x},{y}) in {viewport.Value.width}x{viewport.Value.height}.", _instanceId);
+			_menuStateByBot[botUsername] = ReplyKeyboardMenuState.Unknown;
+			_menuConfigurationError = $"Saved menu button position for @{botUsername} is outside the browser viewport; reconfigure it.";
+			return false;
+		}
+		if (!await _controller.SetReplyKeyboardMenuStateAsync(x, y, desiredState))
+		{
+			_menuStateByBot[botUsername] = ReplyKeyboardMenuState.Unknown;
+			_menuConfigurationError = $"Telegram menu state could not be confirmed for @{botUsername}; promotion is paused.";
+			return false;
+		}
+		_menuStateByBot[botUsername] = desiredState;
+		_menuConfigurationError = "";
+		return true;
 	}
 
 	private async Task<bool> SubmitStopOnceDuringRecoveryAsync(int cycleNumber)

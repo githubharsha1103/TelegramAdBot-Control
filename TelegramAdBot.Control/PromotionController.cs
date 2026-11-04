@@ -15,6 +15,7 @@ public sealed class PromotionController
 {
     private readonly BotConfig _config;
     private readonly BotConfigManager _botConfig;
+    private readonly BotMenuButtonPositionStore _menuButtonPositions;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private readonly ConcurrentDictionary<int, InstanceAccountProgress> _instanceProgress = new();
     private readonly object _errorLock = new();
@@ -29,13 +30,29 @@ public sealed class PromotionController
     private int _currentSelectedAccountIndex;
     private PromotionRunState _runState = PromotionRunState.Idle;
 
-    public PromotionController(BotConfig config, BotConfigManager? botConfig = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _manualInstances = new ManualInstanceManager(config); }
+    public PromotionController(BotConfig config, BotConfigManager? botConfig = null, BotMenuButtonPositionStore? menuButtonPositions = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _menuButtonPositions = menuButtonPositions ?? new BotMenuButtonPositionStore(); _manualInstances = new ManualInstanceManager(config); }
 
     public IReadOnlyList<string> GetAvailableBots() => _botConfig.GetBots();
     public int MaxSupportedInstanceCount => GetMaximumInstanceCount();
     public int GetConfiguredBotCount() => _botConfig.GetBots().Count;
     public bool TryAddBot(string username, out string normalized, out string error) => _botConfig.TryAdd(username, out normalized, out error);
     public bool RemoveBot(string username) => _botConfig.Remove(username);
+    public BotMenuButtonPosition? GetMenuButtonPosition(string username) => _menuButtonPositions.Get(username);
+    public bool SaveMenuButtonPosition(BotMenuButtonPosition position) => _menuButtonPositions.Save(position);
+
+    public async Task<(BotMenuButtonPosition? Position, string Error)> PickMenuButtonPositionAsync(string botUsername, CancellationToken cancellationToken = default)
+    {
+        string bot = BotMenuButtonPositionStore.Normalize(botUsername);
+        if (!_botConfig.GetBots().Contains(bot, StringComparer.OrdinalIgnoreCase)) return (null, $"@{bot} is not in the configured bot list.");
+        BotEngine? engine = _manager?.Engines.FirstOrDefault(candidate => candidate.IsBrowserAlive && (!candidate.IsRunning || candidate.IsPaused));
+        if (engine == null)
+        {
+            if (_manager?.Engines.Any(candidate => candidate.IsBrowserAlive) == true) return (null, "Pause promotion before selecting a menu button position.");
+            return (null, "No existing Playwright VNC browser is open. Start promotion; if this bot has no saved menu position, it will pause safely for configuration.");
+        }
+        if (engine.IsInitializing) return (null, "Wait for browser startup to finish before selecting a menu button position.");
+        return await engine.PickMenuButtonPositionAsync(bot, cancellationToken);
+    }
     public int ManualInstanceLimit => _manualInstances.MaximumInstanceCount;
     public IReadOnlyList<int> GetRegisteredManualInstanceIds() => _manualInstances.GetRegisteredInstanceIds();
     public IReadOnlyList<int> GetConfiguredInstanceIds() => _manualInstances.GetRegisteredInstanceIds();
@@ -351,7 +368,7 @@ public sealed class PromotionController
 			// Each existing engine instance processes the configured bot list independently.
 			TotalCycles = (_run?.SelectedBots.Count ?? 0) * (_run?.CyclesPerBot ?? 0) * (_run?.AccountsByInstance.Values.Sum(accounts => accounts.Count) ?? 0),
             CompletedCycles = manager?.Engines.Sum(x => x.CompletedCycles) ?? 0,
-            LastError = _lastError
+            LastError = !string.IsNullOrWhiteSpace(_lastError) ? _lastError : manager?.Engines.Select(engine => engine.MenuConfigurationError).FirstOrDefault(message => !string.IsNullOrWhiteSpace(message)) ?? ""
         };
         if (manager != null)
         {

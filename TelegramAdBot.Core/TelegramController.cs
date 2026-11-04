@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Playwright;
 using TelegramAdBot.Helpers;
@@ -428,26 +429,6 @@ public class TelegramController : IAsyncDisposable
 		return webBase.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/#@" + botUsername.Trim().TrimStart('@');
 	}
 
-	public async Task<bool> DismissReplyKeyboardAsync()
-	{
-		try
-		{
-			if (_page == null || _page.IsClosed) return false;
-			await _page.BringToFrontAsync();
-			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
-			await BrowserDiagnosticAsync("Escape", "before");
-			await _page.Keyboard.PressAsync("Escape");
-			await BrowserDiagnosticAsync("Escape pressed", "after", screenshot: true);
-			Logger.Info("[Chat] Reply keyboard dismissal attempted with Escape.", _instanceId);
-			return true;
-		}
-		catch (Exception ex)
-		{
-			Logger.Warning("[Chat] Could not dismiss reply keyboard: " + ex.Message, _instanceId);
-			return false;
-		}
-	}
-
 	public async Task<bool> VerifyStartupChatAndFocusMessageInputAsync(string botUsername)
 	{
 		ILocator? messageInput = null;
@@ -474,7 +455,7 @@ public class TelegramController : IAsyncDisposable
 				Logger.Error($"[StartupDiag] Message-input focus or conversation verification failed for @{botUsername}. Startup halted; no recovery click will be attempted.", _instanceId);
 				return false;
 			}
-			Logger.Info($"[StartupDiag] Startup Escape skipped: Telegram Web K dismissal behavior is not safe for this bot keyboard. @{botUsername} remains open; message input is active.", _instanceId);
+			Logger.Info($"[StartupDiag] Startup chat @{botUsername} remains open; message input is active.", _instanceId);
 			return true;
 		}
 		catch (Exception ex)
@@ -533,9 +514,10 @@ public class TelegramController : IAsyncDisposable
 		}
 	}
 
-	public async Task<(int x, int y)?> PickPositionAsync(string label)
+	public async Task<(int x, int y)?> PickPositionAsync(string label, CancellationToken cancellationToken = default)
 	{
 		_ = 5;
+		bool trackerInstalled = false;
 		try
 		{
 			if (_page == null)
@@ -551,13 +533,13 @@ public class TelegramController : IAsyncDisposable
 			{
 			}
 			await _page.EvaluateAsync("() => {\r\n                window.__lastMouseX = -1;\r\n                window.__lastMouseY = -1;\r\n                window.__mouseTracker = (e) => {\r\n                    window.__lastMouseX = e.clientX;\r\n                    window.__lastMouseY = e.clientY;\r\n                };\r\n                window.addEventListener('mousemove', window.__mouseTracker, true);\r\n                document.addEventListener('mousemove', window.__mouseTracker, true);\r\n                window.addEventListener('pointermove', window.__mouseTracker, true);\r\n            }");
+			trackerInstalled = true;
 			for (int i = 4; i > 0; i--)
 			{
 				Logger.Info($"Move mouse now... {i}", _instanceId);
-				await Task.Delay(1000);
+				await Task.Delay(1000, cancellationToken);
 			}
 			PickPositionResult pos = JsonSerializer.Deserialize(await _page.EvaluateAsync<string>("() => JSON.stringify({x: window.__lastMouseX, y: window.__lastMouseY})"), AppJsonContext.Default.PickPositionResult);
-			await _page.EvaluateAsync("() => {\r\n                if (window.__mouseTracker) {\r\n                    window.removeEventListener('mousemove', window.__mouseTracker, true);\r\n                    document.removeEventListener('mousemove', window.__mouseTracker, true);\r\n                    window.removeEventListener('pointermove', window.__mouseTracker, true);\r\n                }\r\n            }");
 			if (pos == null || pos.X < 0 || pos.Y < 0)
 			{
 				Logger.Error("Mouse not detected. Move mouse in browser during countdown!", _instanceId);
@@ -576,6 +558,80 @@ public class TelegramController : IAsyncDisposable
 			Logger.Error("Pick error: " + ex.Message, _instanceId);
 			return null;
 		}
+		finally
+		{
+			if (trackerInstalled && _page != null && !_page.IsClosed)
+			{
+				try
+				{
+					await _page.EvaluateAsync("() => { if (window.__mouseTracker) { window.removeEventListener('mousemove', window.__mouseTracker, true); document.removeEventListener('mousemove', window.__mouseTracker, true); window.removeEventListener('pointermove', window.__mouseTracker, true); delete window.__mouseTracker; } }");
+				}
+				catch (Exception ex) { Logger.Warning("Could not remove coordinate picker mouse tracker: " + ex.Message, _instanceId); }
+			}
+		}
+	}
+
+	public async Task<(int x, int y, int width, int height)?> PickPositionWithViewportAsync(string label, CancellationToken cancellationToken = default)
+	{
+		(int x, int y)? position = await PickPositionAsync(label, cancellationToken);
+		(int width, int height)? viewport = await GetViewportSizeAsync();
+		return position.HasValue && viewport.HasValue ? (position.Value.x, position.Value.y, viewport.Value.width, viewport.Value.height) : null;
+	}
+
+	public async Task<(int width, int height)?> GetViewportSizeAsync()
+	{
+		try
+		{
+			if (_page == null || _page.IsClosed) return null;
+			ViewportResult result = await _page.EvaluateAsync<ViewportResult>("() => ({width: window.innerWidth, height: window.innerHeight})");
+			return result.Width > 0 && result.Height > 0 ? (result.Width, result.Height) : null;
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning("Could not read browser viewport dimensions: " + ex.Message, _instanceId);
+			return null;
+		}
+	}
+
+	public async Task<ReplyKeyboardMenuState> GetReplyKeyboardMenuStateAsync()
+	{
+		try
+		{
+			if (_page == null || _page.IsClosed) return ReplyKeyboardMenuState.Unknown;
+			string state = await _page.EvaluateAsync<string>("() => { const items=[...document.querySelectorAll('[aria-controls^=reply-keyboard-][aria-expanded]')].filter(e => { const r=e.getBoundingClientRect(); return r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden'; }); if(items.length!==1) return 'unknown'; return items[0].getAttribute('aria-expanded')==='true' ? 'open' : items[0].getAttribute('aria-expanded')==='false' ? 'closed' : 'unknown'; }");
+			return state switch { "open" => ReplyKeyboardMenuState.Open, "closed" => ReplyKeyboardMenuState.Closed, _ => ReplyKeyboardMenuState.Unknown };
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning("Could not determine Telegram reply keyboard state: " + ex.Message, _instanceId);
+			return ReplyKeyboardMenuState.Unknown;
+		}
+	}
+
+	public async Task<bool> SetReplyKeyboardMenuStateAsync(int x, int y, ReplyKeyboardMenuState desiredState)
+	{
+		if (_page == null || _page.IsClosed || desiredState == ReplyKeyboardMenuState.Unknown) return false;
+		ReplyKeyboardMenuState currentState = await GetReplyKeyboardMenuStateAsync();
+		if (currentState == ReplyKeyboardMenuState.Unknown) return false;
+		if (currentState == desiredState) return true;
+		if (!await ClickAsync(x, y, "Telegram reply keyboard menu button", captureScreenshots: true)) return false;
+		bool expected = desiredState == ReplyKeyboardMenuState.Open;
+		try
+		{
+			await _page.WaitForFunctionAsync("expected => { const items=[...document.querySelectorAll('[aria-controls^=reply-keyboard-][aria-expanded]')].filter(e => { const r=e.getBoundingClientRect(); return r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden'; }); return items.length===1 && items[0].getAttribute('aria-expanded')===(expected ? 'true' : 'false'); }", expected, new PageWaitForFunctionOptions { Timeout = 5000 });
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning($"Reply keyboard state did not become {desiredState} after the configured menu button click: {ex.Message}", _instanceId);
+			return false;
+		}
+		return await GetReplyKeyboardMenuStateAsync() == desiredState;
+	}
+
+	private sealed class ViewportResult
+	{
+		public int Width { get; set; }
+		public int Height { get; set; }
 	}
 
 	public async Task<bool> ClickAsync(int x, int y, string action = "Mouse click", bool captureScreenshots = false)

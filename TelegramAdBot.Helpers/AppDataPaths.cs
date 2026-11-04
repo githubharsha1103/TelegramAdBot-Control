@@ -15,6 +15,8 @@ public static class AppDataPaths
 
 	public static string BotConfigFile => Path.Combine(Root, "bots.json");
 
+	public static string BotMenuButtonPositionsFile => Path.Combine(Root, "bot_menu_button_positions.json");
+
 	public static string ManualInstancesFile => Path.Combine(Root, "manual_instances.json");
 
 	public static string SetupFlagFile => Path.Combine(Root, "setup_done.flag");
