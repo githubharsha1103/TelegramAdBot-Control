@@ -11,22 +11,22 @@ public class SavedPositions
 	public int TextboxY { get; set; }
 
 	[JsonPropertyName("EmojiButtonX")]
-	public int EmojiButtonX { get; set; } = 993;
+	public int EmojiButtonX { get; set; } = 992;
 
 	[JsonPropertyName("EmojiButtonY")]
-	public int EmojiButtonY { get; set; } = 530;
+	public int EmojiButtonY { get; set; } = 599;
 
 	[JsonPropertyName("StickerTabX")]
-	public int StickerTabX { get; set; } = 816;
+	public int StickerTabX { get; set; } = 815;
 
 	[JsonPropertyName("StickerTabY")]
-	public int StickerTabY { get; set; } = 420;
+	public int StickerTabY { get; set; } = 534;
 
 	[JsonPropertyName("StickerX")]
 	public int StickerX { get; set; } = 655;
 
 	[JsonPropertyName("StickerY")]
-	public int StickerY { get; set; } = 385;
+	public int StickerY { get; set; } = 450;
 
 	[JsonPropertyName("BotSearchResultX")]
 	public int BotSearchResultX { get; set; } = 228;

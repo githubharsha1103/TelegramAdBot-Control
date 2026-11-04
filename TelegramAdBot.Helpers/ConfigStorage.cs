@@ -54,14 +54,14 @@ public static class ConfigStorage
 			}
 			config.TextboxX = data.TextboxX;
 			config.TextboxY = data.TextboxY;
-			bool stickerCoordinatesChanged = data.EmojiButtonX != 993 || data.EmojiButtonY != 530 ||
-				data.StickerTabX != 816 || data.StickerTabY != 420 || data.StickerX != 655 || data.StickerY != 385;
-			config.EmojiButtonX = 993;
-			config.EmojiButtonY = 530;
-			config.StickerTabX = 816;
-			config.StickerTabY = 420;
+			bool stickerCoordinatesChanged = data.EmojiButtonX != 992 || data.EmojiButtonY != 599 ||
+				data.StickerTabX != 815 || data.StickerTabY != 534 || data.StickerX != 655 || data.StickerY != 450;
+			config.EmojiButtonX = 992;
+			config.EmojiButtonY = 599;
+			config.StickerTabX = 815;
+			config.StickerTabY = 534;
 			config.StickerX = 655;
-			config.StickerY = 385;
+			config.StickerY = 450;
 			config.BotSearchResultX = data.BotSearchResultX;
 			config.BotSearchResultY = data.BotSearchResultY;
 			config.AccountMenuX = data.AccountMenuX; config.AccountMenuY = data.AccountMenuY;

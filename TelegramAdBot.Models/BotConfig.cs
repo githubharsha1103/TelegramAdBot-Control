@@ -61,7 +61,7 @@ public class BotConfig
 
 	public int BrowserWidth { get; set; } = 1100;
 
-	public int BrowserHeight { get; set; } = 720;
+	public int BrowserHeight { get; set; } = 785;
 
 	public int ViewportWidth { get; set; } = 1100;
 
@@ -71,17 +71,17 @@ public class BotConfig
 
 	public int TextboxY { get; set; }
 
-	public int EmojiButtonX { get; set; } = 993;
+	public int EmojiButtonX { get; set; } = 992;
 
-	public int EmojiButtonY { get; set; } = 530;
+	public int EmojiButtonY { get; set; } = 599;
 
-	public int StickerTabX { get; set; } = 816;
+	public int StickerTabX { get; set; } = 815;
 
-	public int StickerTabY { get; set; } = 420;
+	public int StickerTabY { get; set; } = 534;
 
 	public int StickerX { get; set; } = 655;
 
-	public int StickerY { get; set; } = 385;
+	public int StickerY { get; set; } = 450;
 
 	public int BotSearchResultX { get; set; } = 228;
 
