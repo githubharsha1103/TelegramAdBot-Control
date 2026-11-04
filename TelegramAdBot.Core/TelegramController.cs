@@ -339,14 +339,10 @@ public class TelegramController : IAsyncDisposable
 			});
 			await BrowserDiagnosticAsync($"Bot search text typed {searchText}", "after");
 			await Task.Delay(500);
-			await _page.WaitForFunctionAsync("username => { const target=username.toLowerCase(); return [...document.querySelectorAll('[role=option],[role=listitem],[data-peer-id],[data-chat-id],a,button')].some(e => { const r=e.getBoundingClientRect(); const text=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')+' '+(e.textContent||'')).toLowerCase(); return r.width>0 && r.height>0 && text.includes(target); }); }", clean, new PageWaitForFunctionOptions { Timeout = 15000 });
-			(int width, int height)? viewport = await GetViewportSizeAsync();
-			int resultX = _config.BotSearchResultX;
-			int resultY = _config.BotSearchResultY;
-			if (!viewport.HasValue || resultX < 0 || resultY < 0 || resultX >= viewport.Value.width || resultY >= viewport.Value.height)
-				throw new InvalidOperationException($"Configured bot search result position ({resultX},{resultY}) is outside the Playwright viewport.");
-			Logger.Info($"Clicking Web A bot search result at Playwright viewport ({resultX},{resultY}).", _instanceId);
-			await _page.Mouse.ClickAsync(resultX, resultY);
+			await _page.GetByText(clean, new PageGetByTextOptions { Exact = false }).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+			Logger.Info($"[Navigation] About to click Web A bot search result at Playwright viewport ({_config.BotSearchResultX},{_config.BotSearchResultY}).", _instanceId);
+			await _page.Mouse.ClickAsync(_config.BotSearchResultX, _config.BotSearchResultY);
+			Logger.Info($"[Navigation] Coordinate click completed at Playwright viewport ({_config.BotSearchResultX},{_config.BotSearchResultY}).", _instanceId);
 			if (!await VerifyConversationReadyAsync())
 				throw new InvalidOperationException($"Web A conversation did not open or its message input was unavailable for @{clean}.");
 			await BrowserDiagnosticAsync($"Bot conversation entered @{clean}; message input visible", "after", screenshot: true);
