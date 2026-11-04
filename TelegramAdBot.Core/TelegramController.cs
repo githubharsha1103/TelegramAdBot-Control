@@ -295,21 +295,6 @@ public class TelegramController : IAsyncDisposable
 			string clean = botUsername.TrimStart('@');
 			Logger.Step("Opening chat: @" + clean, _instanceId);
 			await BrowserDiagnosticAsync($"Bot search started @{clean}", "before");
-			try
-			{
-				if (!_page.Url.Contains("web.telegram.org"))
-				{
-					await _page.GotoAsync(_config.TelegramWebUrl, new PageGotoOptions
-					{
-						WaitUntil = WaitUntilState.DOMContentLoaded,
-						Timeout = 15000f
-					});
-					await Task.Delay(2000);
-				}
-			}
-			catch
-			{
-			}
 			bool searchClicked = false;
 			try
 			{
