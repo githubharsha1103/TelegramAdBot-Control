@@ -71,17 +71,17 @@ public class BotConfig
 
 	public int TextboxY { get; set; }
 
-	public int EmojiButtonX { get; set; }
+	public int EmojiButtonX { get; set; } = 993;
 
-	public int EmojiButtonY { get; set; }
+	public int EmojiButtonY { get; set; } = 530;
 
-	public int StickerTabX { get; set; }
+	public int StickerTabX { get; set; } = 816;
 
-	public int StickerTabY { get; set; }
+	public int StickerTabY { get; set; } = 420;
 
-	public int StickerX { get; set; }
+	public int StickerX { get; set; } = 655;
 
-	public int StickerY { get; set; }
+	public int StickerY { get; set; } = 385;
 
 	public int BotSearchResultX { get; set; } = 228;
 

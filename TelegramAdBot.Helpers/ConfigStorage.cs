@@ -54,12 +54,14 @@ public static class ConfigStorage
 			}
 			config.TextboxX = data.TextboxX;
 			config.TextboxY = data.TextboxY;
-			config.EmojiButtonX = data.EmojiButtonX;
-			config.EmojiButtonY = data.EmojiButtonY;
-			config.StickerTabX = data.StickerTabX;
-			config.StickerTabY = data.StickerTabY;
-			config.StickerX = data.StickerX;
-			config.StickerY = data.StickerY;
+			bool stickerCoordinatesChanged = data.EmojiButtonX != 993 || data.EmojiButtonY != 530 ||
+				data.StickerTabX != 816 || data.StickerTabY != 420 || data.StickerX != 655 || data.StickerY != 385;
+			config.EmojiButtonX = 993;
+			config.EmojiButtonY = 530;
+			config.StickerTabX = 816;
+			config.StickerTabY = 420;
+			config.StickerX = 655;
+			config.StickerY = 385;
 			config.BotSearchResultX = data.BotSearchResultX;
 			config.BotSearchResultY = data.BotSearchResultY;
 			config.AccountMenuX = data.AccountMenuX; config.AccountMenuY = data.AccountMenuY;
@@ -71,6 +73,11 @@ public static class ConfigStorage
 			Logger.Info($"EmojiButton : ({config.EmojiButtonX},{config.EmojiButtonY})");
 			Logger.Info($"StickerTab  : ({config.StickerTabX},{config.StickerTabY})");
 			Logger.Info($"Sticker     : ({config.StickerX},{config.StickerY})");
+			if (stickerCoordinatesChanged)
+			{
+				Logger.Info("Updating persisted Telegram Web A sticker coordinates.");
+				SavePositions(config);
+			}
 			return true;
 		}
 		catch (Exception ex)
