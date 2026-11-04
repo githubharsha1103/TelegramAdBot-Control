@@ -22,6 +22,8 @@ public static class ConfigStorage
 				StickerTabY = config.StickerTabY,
 				StickerX = config.StickerX,
 				StickerY = config.StickerY,
+				BotSearchResultX = config.BotSearchResultX,
+				BotSearchResultY = config.BotSearchResultY,
 				AccountMenuX = config.AccountMenuX, AccountMenuY = config.AccountMenuY,
 				Account1X = config.Account1X, Account1Y = config.Account1Y,
 				Account2X = config.Account2X, Account2Y = config.Account2Y,
@@ -58,6 +60,8 @@ public static class ConfigStorage
 			config.StickerTabY = data.StickerTabY;
 			config.StickerX = data.StickerX;
 			config.StickerY = data.StickerY;
+			config.BotSearchResultX = data.BotSearchResultX;
+			config.BotSearchResultY = data.BotSearchResultY;
 			config.AccountMenuX = data.AccountMenuX; config.AccountMenuY = data.AccountMenuY;
 			config.Account1X = data.Account1X; config.Account1Y = data.Account1Y;
 			config.Account2X = data.Account2X; config.Account2Y = data.Account2Y;

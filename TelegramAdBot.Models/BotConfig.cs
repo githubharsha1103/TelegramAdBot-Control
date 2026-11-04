@@ -83,6 +83,10 @@ public class BotConfig
 
 	public int StickerY { get; set; }
 
+	public int BotSearchResultX { get; set; } = 228;
+
+	public int BotSearchResultY { get; set; } = 298;
+
 	public int AccountMenuX { get; set; } = 46;
 	public int AccountMenuY { get; set; } = 44;
 	public int Account1X { get; set; } = 108;

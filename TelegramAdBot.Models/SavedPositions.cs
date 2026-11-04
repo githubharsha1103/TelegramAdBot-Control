@@ -28,6 +28,12 @@ public class SavedPositions
 	[JsonPropertyName("StickerY")]
 	public int StickerY { get; set; }
 
+	[JsonPropertyName("BotSearchResultX")]
+	public int BotSearchResultX { get; set; } = 228;
+
+	[JsonPropertyName("BotSearchResultY")]
+	public int BotSearchResultY { get; set; } = 298;
+
 	[JsonPropertyName("AccountMenuX")] public int AccountMenuX { get; set; } = 46;
 	[JsonPropertyName("AccountMenuY")] public int AccountMenuY { get; set; } = 44;
 	[JsonPropertyName("Account1X")] public int Account1X { get; set; } = 108;

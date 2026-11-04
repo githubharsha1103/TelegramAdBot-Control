@@ -152,6 +152,8 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 	private static readonly JsonEncodedText PropName_StickerX = JsonEncodedText.Encode("StickerX");
 
 	private static readonly JsonEncodedText PropName_StickerY = JsonEncodedText.Encode("StickerY");
+	private static readonly JsonEncodedText PropName_BotSearchResultX = JsonEncodedText.Encode("BotSearchResultX");
+	private static readonly JsonEncodedText PropName_BotSearchResultY = JsonEncodedText.Encode("BotSearchResultY");
 
 	private static readonly JsonEncodedText PropName_AccountMenuX = JsonEncodedText.Encode("AccountMenuX");
 	private static readonly JsonEncodedText PropName_AccountMenuY = JsonEncodedText.Encode("AccountMenuY");
@@ -1725,7 +1727,7 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 
 	private static JsonPropertyInfo[] SavedPositionsPropInit(JsonSerializerOptions options)
 	{
-		JsonPropertyInfo[] array = new JsonPropertyInfo[16];
+		JsonPropertyInfo[] array = new JsonPropertyInfo[18];
 		JsonPropertyInfoValues<int> info0 = new JsonPropertyInfoValues<int>
 		{
 			IsProperty = true,
@@ -1894,6 +1896,8 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 		array[13] = CreateSavedPositionsIntProperty(options, "Account2Y", (obj, value) => ((SavedPositions)obj).Account2Y = value, obj => ((SavedPositions)obj).Account2Y);
 		array[14] = CreateSavedPositionsIntProperty(options, "Account3X", (obj, value) => ((SavedPositions)obj).Account3X = value, obj => ((SavedPositions)obj).Account3X);
 		array[15] = CreateSavedPositionsIntProperty(options, "Account3Y", (obj, value) => ((SavedPositions)obj).Account3Y = value, obj => ((SavedPositions)obj).Account3Y);
+		array[16] = CreateSavedPositionsIntProperty(options, "BotSearchResultX", (obj, value) => ((SavedPositions)obj).BotSearchResultX = value, obj => ((SavedPositions)obj).BotSearchResultX);
+		array[17] = CreateSavedPositionsIntProperty(options, "BotSearchResultY", (obj, value) => ((SavedPositions)obj).BotSearchResultY = value, obj => ((SavedPositions)obj).BotSearchResultY);
 		return array;
 	}
 
@@ -1934,6 +1938,8 @@ public class AppJsonContext : JsonSerializerContext, IJsonTypeInfoResolver
 		writer.WriteNumber(PropName_StickerTabY, value.StickerTabY);
 		writer.WriteNumber(PropName_StickerX, value.StickerX);
 		writer.WriteNumber(PropName_StickerY, value.StickerY);
+		writer.WriteNumber(PropName_BotSearchResultX, value.BotSearchResultX);
+		writer.WriteNumber(PropName_BotSearchResultY, value.BotSearchResultY);
 		writer.WriteNumber(PropName_AccountMenuX, value.AccountMenuX);
 		writer.WriteNumber(PropName_AccountMenuY, value.AccountMenuY);
 		writer.WriteNumber(PropName_Account1X, value.Account1X);

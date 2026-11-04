@@ -284,7 +284,7 @@ public class TelegramController : IAsyncDisposable
 		await TryNavigateToBotChatAsync(botUsername);
 	}
 
-	public async Task<bool> TryNavigateToBotChatAsync(string botUsername, bool waitAfterEnter = true)
+	public async Task<bool> TryNavigateToBotChatAsync(string botUsername)
 	{
 		try
 		{
@@ -353,15 +353,17 @@ public class TelegramController : IAsyncDisposable
 			});
 			await BrowserDiagnosticAsync($"Bot search text typed t.me/{clean}", "after");
 			await Task.Delay(500);
-			await BrowserDiagnosticAsync("Bot search submitted Enter", "before");
-			await _page.Keyboard.PressAsync("Enter");
-			await BrowserDiagnosticAsync("Bot search submitted Enter", "after");
-			await _page.Locator(SEL_CHAT_LIST).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-			if (waitAfterEnter) await Task.Delay(2000);
-			if (!await VerifyExpectedBotConversationAsync(clean, requireMessageInput: true))
-				throw new InvalidOperationException($"Web A did not verify the selected conversation @{clean}.");
-			await BrowserDiagnosticAsync($"Bot search completed @{clean}; expected chat list visible", "after");
-			await BrowserDiagnosticAsync($"Bot conversation entered @{clean}; expected chat list visible", "after", screenshot: true);
+			await _page.WaitForFunctionAsync("username => { const target=username.toLowerCase(); return [...document.querySelectorAll('[role=option],[role=listitem],[data-peer-id],[data-chat-id],a,button')].some(e => { const r=e.getBoundingClientRect(); const text=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')+' '+(e.textContent||'')).toLowerCase(); return r.width>0 && r.height>0 && text.includes(target); }); }", clean, new PageWaitForFunctionOptions { Timeout = 15000 });
+			(int width, int height)? viewport = await GetViewportSizeAsync();
+			int resultX = _config.BotSearchResultX;
+			int resultY = _config.BotSearchResultY;
+			if (!viewport.HasValue || resultX < 0 || resultY < 0 || resultX >= viewport.Value.width || resultY >= viewport.Value.height)
+				throw new InvalidOperationException($"Configured bot search result position ({resultX},{resultY}) is outside the Playwright viewport.");
+			Logger.Info($"Clicking Web A bot search result at Playwright viewport ({resultX},{resultY}).", _instanceId);
+			await _page.Mouse.ClickAsync(resultX, resultY);
+			if (!await VerifyConversationReadyAsync())
+				throw new InvalidOperationException($"Web A conversation did not open or its message input was unavailable for @{clean}.");
+			await BrowserDiagnosticAsync($"Bot conversation entered @{clean}; message input visible", "after", screenshot: true);
 			Logger.Success("Opened @" + clean, _instanceId);
 			return true;
 		}
@@ -372,64 +374,25 @@ public class TelegramController : IAsyncDisposable
 		}
 	}
 
-	public static bool IsExpectedBotConversationUrl(string actualUrl, string telegramWebUrl, string botUsername)
+	public async Task<bool> VerifyConversationReadyAsync()
 	{
-		if (string.IsNullOrWhiteSpace(actualUrl) || string.IsNullOrWhiteSpace(telegramWebUrl) || string.IsNullOrWhiteSpace(botUsername)) return false;
-		if (!Uri.TryCreate(actualUrl, UriKind.Absolute, out Uri? actual) || !Uri.TryCreate(telegramWebUrl, UriKind.Absolute, out Uri? webBase)) return false;
-		string expectedIdentifier = "@" + botUsername.Trim().TrimStart('@');
-		string actualIdentifier;
-		try { actualIdentifier = Uri.UnescapeDataString(actual.Fragment.TrimStart('#')); }
-		catch { return false; }
-		string fragment = actualIdentifier.Trim();
-		bool identified = string.Equals(fragment, expectedIdentifier, StringComparison.OrdinalIgnoreCase) ||
-			fragment.StartsWith("?", StringComparison.Ordinal) && fragment.Contains("username=" + botUsername.Trim().TrimStart('@'), StringComparison.OrdinalIgnoreCase);
-		return string.Equals(actual.Scheme, webBase.Scheme, StringComparison.OrdinalIgnoreCase) &&
-			string.Equals(actual.Host, webBase.Host, StringComparison.OrdinalIgnoreCase) &&
-			actual.Port == webBase.Port &&
-			actual.AbsolutePath.TrimEnd('/').StartsWith(webBase.AbsolutePath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase) &&
-			identified;
-	}
-
-	public async Task<bool> VerifyExpectedBotConversationAsync(string botUsername, bool requireMessageInput)
-	{
-		string actualUrl = _page == null || _page.IsClosed ? "<unavailable>" : _page.Url;
-		string expectedUrl = BuildExpectedBotConversationUrl(botUsername);
-		Logger.Info($"[Recovery] URL verification started. Expected={expectedUrl}; Actual={actualUrl}", _instanceId);
-		bool matches = IsExpectedBotConversationUrl(actualUrl, _config.TelegramWebUrl, botUsername);
-		if (!matches)
+		try
 		{
-			Logger.Warning($"[Recovery] Conversation URL mismatch. Expected={expectedUrl}; Actual={actualUrl}", _instanceId);
+			if (_page == null || _page.IsClosed) return false;
+			await _page.Locator(SEL_MESSAGE_INPUT).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+			Logger.Success("Telegram conversation is open and its message input is available.", _instanceId);
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Logger.Warning($"Telegram conversation/message input is not ready: {ex.Message}", _instanceId);
 			return false;
 		}
-
-		if (requireMessageInput)
-		{
-			try
-			{
-				if (_page == null || _page.IsClosed) return false;
-				await _page.Locator(SEL_MESSAGE_INPUT).First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
-			}
-			catch (Exception ex)
-			{
-				Logger.Warning($"[Recovery] Expected conversation URL matched but message input is unavailable: {ex.Message}", _instanceId);
-				return false;
-			}
-		}
-
-		Logger.Success($"[Recovery] Conversation verified successfully: {expectedUrl}", _instanceId);
-		return true;
-	}
-
-	private string BuildExpectedBotConversationUrl(string botUsername)
-	{
-		if (!Uri.TryCreate(_config.TelegramWebUrl, UriKind.Absolute, out Uri? webBase)) return "<invalid TelegramWebUrl>";
-		return webBase.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/#@" + botUsername.Trim().TrimStart('@');
 	}
 
 	public async Task<bool> VerifyStartupChatAndFocusMessageInputAsync(string botUsername)
 	{
 		ILocator? messageInput = null;
-		string urlBeforeFocus = "<unavailable>";
 		try
 		{
 			if (_page == null || _page.IsClosed) return false;
@@ -438,15 +401,12 @@ public class TelegramController : IAsyncDisposable
 			await _page.BringToFrontAsync();
 			messageInput = _page.Locator(SEL_MESSAGE_INPUT).First;
 			await messageInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
-			urlBeforeFocus = _page.Url;
 			await BrowserDiagnosticAsync($"Startup bot conversation @{botUsername} active; message input visible", "before-focus", screenshot: true);
 			await messageInput.FocusAsync();
 			await BrowserDiagnosticAsync("Startup message input FocusAsync completed (active element captured immediately)", "after-focus", screenshot: true);
 			bool inputHasFocus = await messageInput.EvaluateAsync<bool>("element => document.activeElement === element");
-			bool conversationStillOpen = !_page.IsClosed && _page.Url == urlBeforeFocus && await messageInput.IsVisibleAsync();
-			bool expectedBotRoute = IsExpectedBotConversationUrl(urlBeforeFocus, _config.TelegramWebUrl, botUsername);
-			if (!expectedBotRoute) expectedBotRoute = await HasTargetChatHeaderAsync(botUsername);
-			if (!inputHasFocus || !conversationStillOpen || !expectedBotRoute)
+			bool conversationStillOpen = !_page.IsClosed && await messageInput.IsVisibleAsync();
+			if (!inputHasFocus || !conversationStillOpen)
 			{
 				await BrowserDiagnosticAsync($"Startup message-input focus or conversation verification failed for @{botUsername}; startup halted", "failure", screenshot: true);
 				Logger.Error($"[StartupDiag] Message-input focus or conversation verification failed for @{botUsername}. Startup halted; no recovery click will be attempted.", _instanceId);
@@ -461,15 +421,6 @@ public class TelegramController : IAsyncDisposable
 			Logger.Error($"[StartupDiag] Startup chat/input verification failed for @{botUsername}: {ex.Message}", _instanceId);
 			return false;
 		}
-	}
-
-	private async Task<bool> HasTargetChatHeaderAsync(string botUsername)
-	{
-		try
-		{
-			return _page != null && !_page.IsClosed && await _page.EvaluateAsync<bool>("username => { const target=username.replace(/^@/,'').toLowerCase(); const nodes=[...document.querySelectorAll('[data-peer-id],[data-chat-id],[class*=ChatInfo],[class*=chatInfo],[class*=title]')]; return nodes.some(e => { const text=((e.getAttribute('title')||'')+' '+(e.getAttribute('aria-label')||'')+' '+(e.textContent||'')).toLowerCase(); return text.includes('@'+target) || text.includes(target); }); }", botUsername);
-		}
-		catch { return false; }
 	}
 
 	public async Task<bool> WaitForTelegramReadyAsync(int timeoutMs = 15000)
