@@ -346,12 +346,13 @@ public class TelegramController : IAsyncDisposable
 			{
 				Logger.Warning("Search not found â€” falling back to keyboard shortcut.", _instanceId);
 			}
-			await BrowserDiagnosticAsync($"Bot search text typed t.me/{clean}", "before");
-			await _page.Keyboard.TypeAsync("t.me/" + clean, new KeyboardTypeOptions
+			string searchText = "@" + clean.TrimStart('@');
+			await BrowserDiagnosticAsync($"Bot search text typed {searchText}", "before");
+			await _page.Keyboard.TypeAsync(searchText, new KeyboardTypeOptions
 			{
 				Delay = 50f
 			});
-			await BrowserDiagnosticAsync($"Bot search text typed t.me/{clean}", "after");
+			await BrowserDiagnosticAsync($"Bot search text typed {searchText}", "after");
 			await Task.Delay(500);
 			await _page.WaitForFunctionAsync("username => { const target=username.toLowerCase(); return [...document.querySelectorAll('[role=option],[role=listitem],[data-peer-id],[data-chat-id],a,button')].some(e => { const r=e.getBoundingClientRect(); const text=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')+' '+(e.textContent||'')).toLowerCase(); return r.width>0 && r.height>0 && text.includes(target); }); }", clean, new PageWaitForFunctionOptions { Timeout = 15000 });
 			(int width, int height)? viewport = await GetViewportSizeAsync();
