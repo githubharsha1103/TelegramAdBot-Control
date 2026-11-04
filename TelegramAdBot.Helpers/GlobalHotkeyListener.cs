@@ -328,9 +328,9 @@ public class GlobalHotkeyListener : IDisposable
             );
         }
 
-        // X11 F1..F3 keysyms are XK_F1..XK_F3 (0xFFBE..0xFFC0).
+        // X11 function keysyms are XK_F1..XK_F12 (0xFFBE..0xFFC9).
         if (windowsVirtualKey >= 0x70 &&
-            windowsVirtualKey <= 0x77)
+            windowsVirtualKey <= 0x7B)
         {
             nint keysym = (nint)(0xFFBE + (windowsVirtualKey - 0x70));
             return XKeysymToKeycode(_display, keysym);

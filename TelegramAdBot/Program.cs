@@ -235,22 +235,31 @@ internal class Program
 		var controller = new PromotionController(_config);
 		var bot = new TelegramControlBot(controller, token!, adminId);
 		using var hotkeys = new GlobalHotkeyListener();
-		hotkeys.Register(0u, 0x77u, "F8 (Capture menu close button)", () =>
+		void RegisterMenuCapture(uint virtualKey, string label, MenuCaptureTarget target)
 		{
-			int rawX = -1, rawY = -1;
-			hotkeys.TryGetPointerPosition(out rawX, out rawY);
-			Task.Run(async () =>
+			hotkeys.Register(0u, virtualKey, label, () =>
 			{
-                GlobalMenuButtonPosition? position = await controller.CaptureMenuButtonPositionAsync(rawX, rawY);
-				if (position == null)
+				if (!hotkeys.TryGetPointerPosition(out int rawX, out int rawY))
 				{
-					Logger.Warning("[MenuCapture] Could not map the current VNC pointer into the Telegram browser viewport; coordinate was not saved.");
+					Logger.Warning($"[{label}] Could not read the X11 pointer; coordinate was not saved.");
 					return;
 				}
-				Logger.Success($"[MenuCapture] Saved Playwright viewport coordinate ({position.X},{position.Y}) at {position.ViewportWidth}x{position.ViewportHeight}.");
-				await bot.NotifyMenuPositionCapturedAsync(position);
+				Task.Run(async () =>
+				{
+					MenuClosePosition? position = await controller.CaptureMenuButtonPositionAsync(rawX, rawY, target, label);
+					if (position == null)
+					{
+						Logger.Warning($"[{label}] Capture validation failed; no position was saved.");
+						await bot.NotifyMenuPositionCaptureFailedAsync(target, "Could not map or validate the VNC pointer in the active Playwright browser. No coordinates were saved.");
+						return;
+					}
+					Logger.Success($"[{label}] Saved Playwright viewport coordinate ({position.X},{position.Y}) at {position.ViewportWidth}x{position.ViewportHeight}.");
+					await bot.NotifyMenuPositionCapturedAsync(target, position);
+				});
 			});
-		});
+		}
+		RegisterMenuCapture(0x77u, "F8 (Out-of-chat menu close)", MenuCaptureTarget.OutOfChat);
+		RegisterMenuCapture(0x78u, "F9 (In-chat Reply Keyboard close)", MenuCaptureTarget.InChat);
 		hotkeys.Start();
 		bot.Start();
 		Logger.Info("[CONTROL] Integrated control bot ready; awaiting Telegram commands.");

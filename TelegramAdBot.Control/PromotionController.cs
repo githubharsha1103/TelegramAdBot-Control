@@ -15,7 +15,7 @@ public sealed class PromotionController
 {
     private readonly BotConfig _config;
     private readonly BotConfigManager _botConfig;
-    private readonly GlobalMenuButtonPositionStore _menuButtonPositions;
+    private readonly MenuClosePositionStore _menuButtonPositions;
     private readonly SemaphoreSlim _commandLock = new(1, 1);
     private readonly ConcurrentDictionary<int, InstanceAccountProgress> _instanceProgress = new();
     private readonly object _errorLock = new();
@@ -30,24 +30,24 @@ public sealed class PromotionController
     private int _currentSelectedAccountIndex;
     private PromotionRunState _runState = PromotionRunState.Idle;
 
-    public PromotionController(BotConfig config, BotConfigManager? botConfig = null, GlobalMenuButtonPositionStore? menuButtonPositions = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _menuButtonPositions = menuButtonPositions ?? new GlobalMenuButtonPositionStore(); _manualInstances = new ManualInstanceManager(config); }
+    public PromotionController(BotConfig config, BotConfigManager? botConfig = null, MenuClosePositionStore? menuButtonPositions = null) { _config = config; _botConfig = botConfig ?? new BotConfigManager(); _menuButtonPositions = menuButtonPositions ?? new MenuClosePositionStore(); _manualInstances = new ManualInstanceManager(config); }
 
     public IReadOnlyList<string> GetAvailableBots() => _botConfig.GetBots();
     public int MaxSupportedInstanceCount => GetMaximumInstanceCount();
     public int GetConfiguredBotCount() => _botConfig.GetBots().Count;
     public bool TryAddBot(string username, out string normalized, out string error) => _botConfig.TryAdd(username, out normalized, out error);
     public bool RemoveBot(string username) => _botConfig.Remove(username);
-    public GlobalMenuButtonPosition? GetMenuButtonPosition() => _menuButtonPositions.Load();
-    public bool SaveMenuButtonPosition(GlobalMenuButtonPosition position) => _menuButtonPositions.Save(position);
+    public MenuClosePositions GetMenuClosePositions() => _menuButtonPositions.Load();
+    public bool SaveMenuClosePosition(MenuCaptureTarget target, MenuClosePosition position) => _menuButtonPositions.Save(target, position);
 
-    public async Task<GlobalMenuButtonPosition?> CaptureMenuButtonPositionAsync(int rawX, int rawY)
+    public async Task<MenuClosePosition?> CaptureMenuButtonPositionAsync(int rawX, int rawY, MenuCaptureTarget target, string hotkey)
     {
         BotEngine? engine = _manager?.Engines.FirstOrDefault(candidate => candidate.IsBrowserAlive);
         if (engine?.Controller == null) return null;
-        var capture = await engine.Controller.CaptureCurrentPagePointerAsync(rawX, rawY);
+        var capture = await engine.Controller.CaptureCurrentPagePointerAsync(rawX, rawY, hotkey);
         if (!capture.HasValue) return null;
-        var position = new GlobalMenuButtonPosition { X = capture.Value.x, Y = capture.Value.y, ViewportWidth = capture.Value.width, ViewportHeight = capture.Value.height, CapturedAt = DateTimeOffset.UtcNow };
-        return SaveMenuButtonPosition(position) ? position : null;
+        var position = new MenuClosePosition { X = capture.Value.x, Y = capture.Value.y, ViewportWidth = capture.Value.width, ViewportHeight = capture.Value.height, CapturedAt = DateTimeOffset.UtcNow };
+        return SaveMenuClosePosition(target, position) ? position : null;
     }
     public int ManualInstanceLimit => _manualInstances.MaximumInstanceCount;
     public IReadOnlyList<int> GetRegisteredManualInstanceIds() => _manualInstances.GetRegisteredInstanceIds();

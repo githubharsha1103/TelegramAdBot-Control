@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using TelegramAdBot.Core;
 using TelegramAdBot.Models;
+using TelegramAdBot.Helpers;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
@@ -284,7 +285,9 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         try
         {
         PromotionStatus status = _controller.GetStatus();
-        GlobalMenuButtonPosition? menuPosition = _controller.GetMenuButtonPosition();
+        MenuClosePositions menuPositions = _controller.GetMenuClosePositions();
+        MenuClosePosition outPosition = menuPositions.OutOfChatMenuClosePosition;
+        MenuClosePosition inPosition = menuPositions.InChatMenuClosePosition;
         string state = status.RunState switch
         {
             PromotionRunState.Running => "🔵 RUNNING",
@@ -319,9 +322,10 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
             $"📈  Completed cycles {status.CompletedCycles}/{status.TotalCycles}",
             $"🌐  Open browsers    {openBrowsers}",
             $"🚀  Active promotion {promotion}",
-            $"Menu close button: {(menuPosition?.Configured == true ? $"Configured ({menuPosition.X},{menuPosition.Y})" : "Not configured")}",
-            "Hotkey: F8",
-            menuPosition?.Configured == true ? $"Last capture: {menuPosition.CapturedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss zzz}" : "Move over the VNC close button and press F8 to capture.",
+            $"Out-of-Chat Menu Close: {(outPosition.Configured ? $"Configured ({outPosition.X},{outPosition.Y})" : "Not configured")}",
+            outPosition.Configured ? $"F8 last capture: {outPosition.CapturedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss zzz}" : "F8: Hover out-of-chat menu close button and capture.",
+            $"In-Chat Reply Keyboard Close: {(inPosition.Configured ? $"Configured ({inPosition.X},{inPosition.Y})" : "Not configured")}",
+            inPosition.Configured ? $"F9 last capture: {inPosition.CapturedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss zzz}" : "F9: Hover in-chat Reply Keyboard close button and capture.",
             "⚡  Last action      " + (_lastNotification.TryGetValue(chatId, out string operation) ? operation : "—"),
             "▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁"
         };
@@ -490,9 +494,21 @@ public sealed class TelegramControlBot : IDisposable, IAsyncDisposable
         new[] { InlineKeyboardButton.WithCallbackData("⚙️ Settings", TaggedCallback("panel", token, "settings")), InlineKeyboardButton.WithCallbackData("❓ Help", TaggedCallback("panel", token, "help")) }
     });
 
-    public async Task NotifyMenuPositionCapturedAsync(GlobalMenuButtonPosition position)
+    public async Task NotifyMenuPositionCapturedAsync(MenuCaptureTarget target, MenuClosePosition position)
     {
-        RecordActivity($"F8 captured menu close button at ({position.X},{position.Y})");
+        string name = target == MenuCaptureTarget.OutOfChat ? "Out-of-chat F8" : "In-chat F9";
+        RecordActivity($"{name} captured position ({position.X},{position.Y})");
+        foreach (long chatId in _panelMessages.Keys)
+        {
+            if (_currentScreens.TryGetValue(chatId, out string screen) && screen == "dashboard")
+                try { await RenderDashboardAsync(chatId, _cts.Token); } catch (OperationCanceledException) { }
+        }
+    }
+
+    public async Task NotifyMenuPositionCaptureFailedAsync(MenuCaptureTarget target, string reason)
+    {
+        string name = target == MenuCaptureTarget.OutOfChat ? "Out-of-chat F8" : "In-chat F9";
+        RecordActivity($"{name} capture failed: {reason}");
         foreach (long chatId in _panelMessages.Keys)
         {
             if (_currentScreens.TryGetValue(chatId, out string screen) && screen == "dashboard")

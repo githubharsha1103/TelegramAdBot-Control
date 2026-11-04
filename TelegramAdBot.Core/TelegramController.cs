@@ -17,8 +17,6 @@ public class TelegramController : IAsyncDisposable
     public enum ReplyKeyboardMenuState { Unknown, Open, Closed }
 	    [DllImport("libX11.so.6")] private static extern nint XOpenDisplay(nint display);
     [DllImport("libX11.so.6")] private static extern int XCloseDisplay(nint display);
-    [DllImport("libX11.so.6")] private static extern int XFree(nint data);
-    [DllImport("libX11.so.6")] private static extern int XFetchName(nint display, nint window, out nint windowName);
     [DllImport("libX11.so.6")] private static extern nint XDefaultRootWindow(nint display);
     [DllImport("libX11.so.6")] private static extern int XQueryPointer(nint display, nint window, out nint root, out nint child, out int rootX, out int rootY, out int windowX, out int windowY, out uint mask);
     [DllImport("libX11.so.6")] private static extern int XTranslateCoordinates(nint display, nint source, nint destination, int srcX, int srcY, out int destX, out int destY, out nint child);
@@ -588,30 +586,39 @@ public class TelegramController : IAsyncDisposable
 		return position.HasValue && viewport.HasValue ? (position.Value.x, position.Value.y, viewport.Value.width, viewport.Value.height) : null;
 	}
 
-	    	public async Task<(int x, int y, int width, int height, int scaleX, int scaleY)?> CaptureCurrentPagePointerAsync(int rawX, int rawY)
+	public async Task<(int x, int y, int width, int height, double deviceScaleFactor, int windowX, int windowY)?> CaptureCurrentPagePointerAsync(int rawX, int rawY, string hotkey)
 	{
 		try
 		{
 			if (_page == null || _page.IsClosed || _display == nint.Zero || rawX < 0 || rawY < 0) return null;
 			nint root = XDefaultRootWindow(_display);
 			if (XQueryPointer(_display, root, out _, out nint window, out int pointerX, out int pointerY, out _, out _, out _) == 0 || pointerX != rawX || pointerY != rawY) return null;
-			if (XFetchName(_display, window, out nint namePtr) == 0 || namePtr == nint.Zero) return null;
-			string title = Marshal.PtrToStringAnsi(namePtr) ?? ""; XFree(namePtr);
-			if (!title.Contains("Telegram", StringComparison.OrdinalIgnoreCase)) return null;
 			if (XTranslateCoordinates(_display, window, root, 0, 0, out int winX, out int winY, out _) == 0) return null;
-			var page = await _page.EvaluateAsync<PointerCaptureResult>("raw => { const x=Math.floor((raw.x-screenX)/devicePixelRatio),y=Math.floor((raw.y-screenY)/devicePixelRatio); const e=document.elementFromPoint(x,y); return {width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1,x,y,valid:!!e && x<innerWidth && y<innerHeight}; }", new { x = pointerX, y = pointerY });
-			int x = page.X, y = page.Y;
-			if (!page.Valid || x < 0 || y < 0 || x >= page.Width || y >= page.Height) return null;
-			int offsetX = pointerX - winX - (int)Math.Round(page.X * page.Dpr);
-			int offsetY = pointerY - winY - (int)Math.Round(page.Y * page.Dpr);
-			Logger.Info($"[MenuCapture] raw X11=({rawX},{rawY}); windowOrigin=({winX},{winY}); measured browser content offset=({offsetX},{offsetY}); deviceScaleFactor={page.Dpr}; Playwright=({x},{y}) viewport={page.Width}x{page.Height}.", _instanceId);
-			return (x, y, page.Width, page.Height, 1, 1);
+			var page = await _page.EvaluateAsync<PointerCaptureResult>("() => { const r=document.documentElement.getBoundingClientRect(); return {width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1,screenX:window.screenX,screenY:window.screenY,outerWidth:window.outerWidth,outerHeight:window.outerHeight,innerLeft:window.outerWidth-window.innerWidth,innerTop:window.outerHeight-window.innerHeight}; }");
+			// X11 root pixels and window.screenX are both desktop coordinates but can
+			// differ by device scale. Use measured Chromium outer geometry to derive the
+			// viewport's desktop origin and reject if that origin doesn't agree with X11.
+			double viewportRootX = winX + page.InnerLeft * page.Dpr;
+			double viewportRootY = winY + page.InnerTop * page.Dpr;
+			double screenRootX = page.ScreenX * page.Dpr;
+			double screenRootY = page.ScreenY * page.Dpr;
+			if (Math.Abs(viewportRootX - screenRootX) > 3 * page.Dpr || Math.Abs(viewportRootY - screenRootY) > 3 * page.Dpr)
+			{
+				Logger.Warning($"[{hotkey}] Coordinate validation failed: X11 window origin ({winX},{winY}) disagrees with Chromium screen origin ({page.ScreenX},{page.ScreenY}) at scale {page.Dpr}.", _instanceId);
+				return null;
+			}
+			int x = (int)Math.Floor((pointerX - screenRootX) / page.Dpr);
+			int y = (int)Math.Floor((pointerY - screenRootY) / page.Dpr);
+			bool hit = await _page.EvaluateAsync<bool>("p => { const e=document.elementFromPoint(p.x,p.y); return !!e && p.x>=0 && p.y>=0 && p.x<innerWidth && p.y<innerHeight; }", new { x, y });
+			bool valid = hit && x >= 0 && y >= 0 && x < page.Width && y < page.Height;
+			Logger.Info($"[{hotkey}] raw X11=({rawX},{rawY}); browser window=({winX},{winY}) outer={page.OuterWidth}x{page.OuterHeight}; viewport={page.Width}x{page.Height}; deviceScaleFactor={page.Dpr}; Playwright=({x},{y}); validation={(valid ? "passed" : "failed")}.", _instanceId);
+			return valid ? (x, y, page.Width, page.Height, page.Dpr, winX, winY) : null;
 		}
-		catch (Exception ex) { Logger.Warning("Could not convert X11 pointer to Playwright coordinates: " + ex.Message, _instanceId); return null; }
+		catch (Exception ex) { Logger.Warning($"[{hotkey}] Could not convert X11 pointer to Playwright coordinates: " + ex.Message, _instanceId); return null; }
 	}
 public async Task<bool> StartMenuButtonPointerTrackingAsync() => _page != null && !_page.IsClosed;
 
-	private sealed class PointerCaptureResult { public int Width { get; set; } public int Height { get; set; } public double Dpr { get; set; } public int X { get; set; } public int Y { get; set; } public int WindowX { get; set; } public int WindowY { get; set; } public bool Valid { get; set; } }
+	private sealed class PointerCaptureResult { public int Width { get; set; } public int Height { get; set; } public double Dpr { get; set; } public double ScreenX { get; set; } public double ScreenY { get; set; } public int OuterWidth { get; set; } public int OuterHeight { get; set; } public int InnerLeft { get; set; } public int InnerTop { get; set; } }
 
 	public async Task<(int width, int height)?> GetViewportSizeAsync()
 	{
