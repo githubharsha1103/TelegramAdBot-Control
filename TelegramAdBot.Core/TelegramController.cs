@@ -435,7 +435,7 @@ public class TelegramController : IAsyncDisposable
 			await BrowserDiagnosticAsync($"Account menu click ({_config.AccountMenuX},{_config.AccountMenuY})", "after", screenshot: true);
 			Logger.Info("[AccountSwitch] Account menu click completed.", _instanceId);
 			Logger.Info("[AccountSwitch] Waiting for account menu to open.", _instanceId);
-			await Task.Delay(750);
+			await Task.Delay(TimeSpan.FromSeconds(2));
 			Logger.Info($"[AccountSwitch] Clicking Account {accountNumber} at X={x} Y={y}.", _instanceId);
 			await BrowserDiagnosticAsync($"Account {accountNumber} click ({x},{y})", "before", screenshot: true);
 			await _page.Mouse.ClickAsync(x, y);
