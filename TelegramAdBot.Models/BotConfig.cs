@@ -91,10 +91,10 @@ public class BotConfig
 	public int AccountMenuY { get; set; } = 44;
 	public int Account1X { get; set; } = 110;
 	public int Account1Y { get; set; } = 91;
-	public int Account2X { get; set; } = 113;
-	public int Account2Y { get; set; } = 131;
-	public int Account3X { get; set; } = 118;
-	public int Account3Y { get; set; } = 166;
+	public int Account2X { get; set; } = 127;
+	public int Account2Y { get; set; } = 136;
+	public int Account3X { get; set; } = 134;
+	public int Account3Y { get; set; } = 167;
 
 	public bool AllSet
 	{
