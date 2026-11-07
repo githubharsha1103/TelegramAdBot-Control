@@ -36,10 +36,10 @@ public class SavedPositions
 
 	[JsonPropertyName("AccountMenuX")] public int AccountMenuX { get; set; } = 46;
 	[JsonPropertyName("AccountMenuY")] public int AccountMenuY { get; set; } = 44;
-	[JsonPropertyName("Account1X")] public int Account1X { get; set; } = 108;
-	[JsonPropertyName("Account1Y")] public int Account1Y { get; set; } = 89;
-	[JsonPropertyName("Account2X")] public int Account2X { get; set; } = 108;
-	[JsonPropertyName("Account2Y")] public int Account2Y { get; set; } = 121;
-	[JsonPropertyName("Account3X")] public int Account3X { get; set; } = 108;
-	[JsonPropertyName("Account3Y")] public int Account3Y { get; set; } = 151;
+	[JsonPropertyName("Account1X")] public int Account1X { get; set; } = 110;
+	[JsonPropertyName("Account1Y")] public int Account1Y { get; set; } = 91;
+	[JsonPropertyName("Account2X")] public int Account2X { get; set; } = 113;
+	[JsonPropertyName("Account2Y")] public int Account2Y { get; set; } = 131;
+	[JsonPropertyName("Account3X")] public int Account3X { get; set; } = 118;
+	[JsonPropertyName("Account3Y")] public int Account3Y { get; set; } = 166;
 }

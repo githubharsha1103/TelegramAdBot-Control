@@ -54,6 +54,8 @@ public static class ConfigStorage
 			}
 			config.TextboxX = data.TextboxX;
 			config.TextboxY = data.TextboxY;
+			bool accountCoordinatesChanged = data.Account1X != 110 || data.Account1Y != 91 ||
+				data.Account2X != 113 || data.Account2Y != 131 || data.Account3X != 118 || data.Account3Y != 166;
 			bool stickerCoordinatesChanged = data.EmojiButtonX != 992 || data.EmojiButtonY != 599 ||
 				data.StickerTabX != 815 || data.StickerTabY != 534 || data.StickerX != 655 || data.StickerY != 450;
 			config.EmojiButtonX = 992;
@@ -65,17 +67,18 @@ public static class ConfigStorage
 			config.BotSearchResultX = data.BotSearchResultX;
 			config.BotSearchResultY = data.BotSearchResultY;
 			config.AccountMenuX = data.AccountMenuX; config.AccountMenuY = data.AccountMenuY;
-			config.Account1X = data.Account1X; config.Account1Y = data.Account1Y;
-			config.Account2X = data.Account2X; config.Account2Y = data.Account2Y;
-			config.Account3X = data.Account3X; config.Account3Y = data.Account3Y;
+			// Account selection is fixed to the current Telegram Web A layout. Ignore legacy overrides.
+			config.Account1X = 110; config.Account1Y = 91;
+			config.Account2X = 113; config.Account2Y = 131;
+			config.Account3X = 118; config.Account3Y = 166;
 			Logger.Success("Positions loaded:");
 			Logger.Info($"Textbox     : ({config.TextboxX},{config.TextboxY})");
 			Logger.Info($"EmojiButton : ({config.EmojiButtonX},{config.EmojiButtonY})");
 			Logger.Info($"StickerTab  : ({config.StickerTabX},{config.StickerTabY})");
 			Logger.Info($"Sticker     : ({config.StickerX},{config.StickerY})");
-			if (stickerCoordinatesChanged)
+			if (stickerCoordinatesChanged || accountCoordinatesChanged)
 			{
-				Logger.Info("Updating persisted Telegram Web A sticker coordinates.");
+				Logger.Info("Updating persisted Telegram Web A coordinates.");
 				SavePositions(config);
 			}
 			return true;
